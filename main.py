@@ -3,22 +3,25 @@ import sys
 import subprocess
 import re
 
-def _install_requirements():
-    req_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'requirements.txt')
-    if os.path.exists(req_file):
-        startupinfo = None
-        if os.name == 'nt':
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        try:
-            subprocess.check_call(
-                [sys.executable, '-m', 'pip', 'install', '-q', '-r', req_file],
-                startupinfo=startupinfo
-            )
-        except Exception:
-            pass
+def _ensure_requirements():
+    try:
+        import imageio_ffmpeg
+    except ImportError:
+        req_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'requirements.txt')
+        if os.path.exists(req_file):
+            startupinfo = None
+            if os.name == 'nt':
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            try:
+                subprocess.check_call(
+                    [sys.executable, '-m', 'pip', 'install', '-q', '-r', req_file],
+                    startupinfo=startupinfo
+                )
+            except Exception:
+                pass
 
-_install_requirements()
+_ensure_requirements()
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -112,6 +115,8 @@ class AudioRemoverApp:
         
         # Footer
         ttk.Label(root, text="Uses imageio-ffmpeg", font=("Segoe UI", 8)).pack(side="bottom", pady=5)
+        
+        self.ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
 
     def on_drop_files(self, files):
         if not files:
@@ -139,7 +144,7 @@ class AudioRemoverApp:
         if self.trim_var.get():
             if not hasattr(self, '_last_autofilled_file') or self._last_autofilled_file != input_path:
                 try:
-                    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+                    ffmpeg_exe = self.ffmpeg_exe
                     startupinfo = None
                     if os.name == 'nt':
                         startupinfo = subprocess.STARTUPINFO()
@@ -153,7 +158,7 @@ class AudioRemoverApp:
                         encoding='utf-8',
                         errors='replace'
                     )
-                    match = re.search(r"Duration: (\d{2}:\d{2}:\d{2})", result.stderr)
+                    match = re.search(r"Duration: (\d{2}:\d{2}:\d{2}(?:\.\d+)?)", result.stderr)
                     if match:
                         self.end_time_var.set(match.group(1))
                         self._last_autofilled_file = input_path
@@ -245,18 +250,16 @@ class AudioRemoverApp:
 
             output_path = os.path.join(folder, f"{name}{suffix}{ext}")
 
-            # Get ffmpeg executable
-            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-
             # Construct command
-            cmd = [ffmpeg_exe, "-y"]
-            
-            cmd.extend(["-i", input_path])
+            cmd = [self.ffmpeg_exe, "-y"]
             
             if trim_args:
                 start_t, end_t = trim_args
+                # Place -ss and -to before -i for fast input seeking
                 cmd.extend(["-ss", start_t, "-to", end_t])
                 
+            cmd.extend(["-i", input_path])
+            
             if convert_format == "None":
                 cmd.extend(["-c", "copy"])
             elif convert_format in ["MP3", "FLAC"]:
@@ -291,11 +294,14 @@ class AudioRemoverApp:
             duration_secs = 0.0
             error_output = []
             
+            duration_re = re.compile(r"Duration: (\d+):(\d+):(\d+\.\d+)")
+            time_re = re.compile(r"time=(\d+):(\d+):(\d+\.\d+)")
+            
             for line in process.stderr:
                 error_output.append(line)
                 
                 if duration_secs == 0.0:
-                    match = re.search(r"Duration: (\d+):(\d+):(\d+\.\d+)", line)
+                    match = duration_re.search(line)
                     if match:
                         h, m, s = match.groups()
                         duration_secs = int(h) * 3600 + int(m) * 60 + float(s)
@@ -314,7 +320,7 @@ class AudioRemoverApp:
                                 pass
 
                 if duration_secs > 0:
-                    match = re.search(r"time=(\d+):(\d+):(\d+\.\d+)", line)
+                    match = time_re.search(line)
                     if match:
                         h, m, s = match.groups()
                         current_secs = int(h) * 3600 + int(m) * 60 + float(s)
