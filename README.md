@@ -13,7 +13,8 @@ Designed for fast and effortless daily media file handling: simply **drag and dr
 
 ### ✨ Key Features
 
-- 🖱️ **Drag & Drop**: Simply drag video/audio files into the app window to start processing immediately.
+- 📋 **Batch Processing & File Queue**: Drag & drop multiple media files into the queue, remove unwanted files, and batch convert, mute, downscale, or transcode all in one go with individual and overall progress tracking.
+- 🖱️ **Drag & Drop**: Simply drag multiple video/audio files or folders into the app window to add them to the queue immediately.
 - ⚡ **GPU Hardware Acceleration**: Auto-detects and accelerates encoding via **NVIDIA NVENC**, **Intel QSV**, and **AMD AMF** with seamless CPU fallback.
 - ✂️ **Precise Cutting**: Visually set start and end times to trim clips with or without re-encoding.
 - 🔄 **Format Conversion**: Convert between popular formats like MP4, MP3, FLAC, etc.
@@ -58,7 +59,8 @@ python main.py
 
 ## ✨ 核心特性
 
-- 🖱️ **拖拽即用 (Drag & Drop)**：支持直接将音频/视频文件拖入窗口，即刻开始处理。
+- 📋 **多文件批量处理 (Batch Queue)**：支持将多个文件拖放进列表队列，支持随时删除不需要的文件、清空列表、键盘快捷键（Delete/Backspace）以及右键菜单管理，一键批量转码、压缩、消音与处理。
+- 🖱️ **拖拽即用 (Drag & Drop)**：支持直接将多个音频/视频文件或文件夹拖入窗口，自动追加至队列并异步解析文件参数。
 - ⚡ **GPU 硬件加速**：支持 **NVIDIA NVENC**、**Intel QSV**、**AMD AMF** 显卡硬件编码自动探测与加速，提速 3~10 倍，并自带 CPU 自动降级保护。
 - ✂️ **精准剪切 (Cut)**：可视化设置起止时间，快速无损或重新编码裁剪片段。
 - 🔄 **格式转换 (Convert)**：支持 MP4, MP3, FLAC 等常见格式快速互转。
