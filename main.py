@@ -270,20 +270,26 @@ class AudioRemoverApp:
             "filename": os.path.basename(input_path),
             "filepath": input_path,
             "filesize": "-",
+            "filesize_bytes": 0,
             "duration": "-",
+            "duration_secs": 0.0,
             "bitrate": "-",
+            "total_bitrate_kbps": None,
             "has_video": False,
             "video_codec": "-",
+            "video_bitrate_kbps": None,
             "resolution": "-",
             "fps": "-",
             "has_audio": False,
             "audio_codec": "-",
+            "audio_bitrate_kbps": None,
             "sample_rate": "-",
             "channels": "-",
         }
 
         if os.path.exists(input_path):
             size_bytes = os.path.getsize(input_path)
+            info["filesize_bytes"] = size_bytes
             if size_bytes >= 1024 * 1024 * 1024:
                 info["filesize"] = f"{size_bytes / (1024**3):.2f} GB"
             elif size_bytes >= 1024 * 1024:
@@ -307,41 +313,57 @@ class AudioRemoverApp:
             )
             stderr_txt = result.stderr
 
-            dur_match = re.search(r"Duration:\s*(\d{2}:\d{2}:\d{2}(?:\.\d+)?)", stderr_txt)
+            dur_match = re.search(r"Duration:\s*(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)", stderr_txt)
             if dur_match:
-                info["duration"] = dur_match.group(1).split('.')[0]
+                h, m, s = dur_match.groups()
+                info["duration"] = f"{h}:{m}:{s.split('.')[0]}"
+                try:
+                    info["duration_secs"] = int(h) * 3600 + int(m) * 60 + float(s)
+                except Exception:
+                    pass
 
-            br_match = re.search(r"bitrate:\s*(\d+\s*k?b/s)", stderr_txt, re.IGNORECASE)
+            br_match = re.search(r"bitrate:\s*(\d+)\s*k?b/s", stderr_txt, re.IGNORECASE)
             if br_match:
-                info["bitrate"] = br_match.group(1)
+                info["bitrate"] = f"{br_match.group(1)} kb/s"
+                info["total_bitrate_kbps"] = int(br_match.group(1))
+            elif info["duration_secs"] > 0 and info["filesize_bytes"] > 0:
+                calc_kbps = int((info["filesize_bytes"] * 8) / (info["duration_secs"] * 1000))
+                info["total_bitrate_kbps"] = calc_kbps
+                info["bitrate"] = f"{calc_kbps} kb/s"
 
             video_line = re.search(r"Stream #\d+:\d+.*?: Video: (.*)", stderr_txt)
             if video_line:
                 v_info = video_line.group(1)
                 info["has_video"] = True
-                parts = v_info.split(',')
+                parts = [p.strip() for p in v_info.split(',')]
                 if parts:
-                    info["video_codec"] = parts[0].strip().split()[0]
+                    info["video_codec"] = parts[0].split()[0]
                 res_m = re.search(r"(\d{2,5}x\d{2,5})", v_info)
                 if res_m:
                     info["resolution"] = res_m.group(1)
                 fps_m = re.search(r"(\d+(?:\.\d+)?)\s*fps", v_info)
                 if fps_m:
                     info["fps"] = f"{fps_m.group(1)} fps"
+                vbr_m = re.search(r"(\d+)\s*kb/s", v_info)
+                if vbr_m:
+                    info["video_bitrate_kbps"] = int(vbr_m.group(1))
 
             audio_line = re.search(r"Stream #\d+:\d+.*?: Audio: (.*)", stderr_txt)
             if audio_line:
                 a_info = audio_line.group(1)
                 info["has_audio"] = True
-                parts = a_info.split(',')
+                parts = [p.strip() for p in a_info.split(',')]
                 if parts:
-                    info["audio_codec"] = parts[0].strip().split()[0]
+                    info["audio_codec"] = parts[0].split()[0]
                 sr_m = re.search(r"(\d+\s*Hz)", a_info)
                 if sr_m:
                     info["sample_rate"] = sr_m.group(1)
                 ch_m = re.search(r"\b(mono|stereo|5\.1|7\.1|\d+\s*channels?)\b", a_info, re.IGNORECASE)
                 if ch_m:
                     info["channels"] = ch_m.group(1)
+                abr_m = re.search(r"(\d+)\s*kb/s", a_info)
+                if abr_m:
+                    info["audio_bitrate_kbps"] = int(abr_m.group(1))
 
         except Exception:
             pass
@@ -428,6 +450,70 @@ class AudioRemoverApp:
         self.progress['value'] = percent
         self.status_var.set(f"Processing... {percent:.1f}%")
 
+    def _get_video_encode_args(self, res_choice, media_info):
+        res_configs = {
+            "144p": {"crf": 28, "maxrate": 160},
+            "240p": {"crf": 26, "maxrate": 350},
+            "360p": {"crf": 25, "maxrate": 700},
+            "480p": {"crf": 24, "maxrate": 1200},
+            "720p": {"crf": 23, "maxrate": 2500},
+            "1080p": {"crf": 23, "maxrate": 5000},
+            "1440p": {"crf": 23, "maxrate": 9000},
+        }
+
+        cfg = res_configs.get(res_choice, {"crf": 23, "maxrate": None})
+        crf = cfg["crf"]
+        maxrate = cfg["maxrate"]
+
+        # Prevent bitrate inflation when downscaling low-bitrate sources
+        src_vbr = media_info.get("video_bitrate_kbps")
+        if not src_vbr and media_info.get("total_bitrate_kbps"):
+            src_vbr = max(int(media_info["total_bitrate_kbps"] * 0.8), 40)
+
+        if src_vbr and maxrate:
+            if res_choice in ["144p", "240p"]:
+                maxrate = min(maxrate, max(int(src_vbr * 0.85), 50))
+            else:
+                maxrate = min(maxrate, max(int(src_vbr * 1.1), 80))
+
+        args = ["-c:v", "libx264", "-preset", "medium", "-crf", str(crf)]
+        if maxrate:
+            args.extend(["-maxrate", f"{maxrate}k", "-bufsize", f"{maxrate * 2}k"])
+        args.extend(["-pix_fmt", "yuv420p"])
+        return args
+
+    def _get_audio_encode_args(self, convert_format, res_choice, media_info, should_mute):
+        if should_mute:
+            return ["-an"]
+
+        if convert_format in ["MP3", "FLAC"]:
+            if convert_format == "MP3":
+                return ["-c:a", "libmp3lame", "-q:a", "2"]
+            else:
+                return ["-c:a", "flac"]
+
+        if convert_format == "None":
+            return ["-c:a", "copy"]
+
+        if convert_format == "MP4":
+            src_acodec = (media_info.get("audio_codec") or "").lower()
+            if "aac" in src_acodec:
+                return ["-c:a", "copy"]
+
+            target_abr = 128
+            if res_choice in ["144p", "240p"]:
+                target_abr = 48
+            elif res_choice in ["360p", "480p"]:
+                target_abr = 96
+
+            src_abr = media_info.get("audio_bitrate_kbps")
+            if src_abr:
+                target_abr = min(target_abr, max(src_abr, 32))
+
+            return ["-c:a", "aac", "-b:a", f"{target_abr}k"]
+
+        return ["-c:a", "copy"]
+
     def process_video(self, input_path, should_mute, convert_format, trim_args=None, res_choice="Original"):
         try:
             folder = os.path.dirname(input_path)
@@ -465,6 +551,8 @@ class AudioRemoverApp:
 
             output_path = os.path.join(folder, f"{name}{suffix}{ext}")
 
+            media_info = self._parse_media_info(input_path)
+
             cmd = [self.ffmpeg_exe, "-y"]
 
             if trim_args:
@@ -476,30 +564,28 @@ class AudioRemoverApp:
             if target_h and convert_format not in ["MP3", "FLAC"]:
                 cmd.extend(["-vf", f"scale=-2:{target_h}"])
 
-            if convert_format == "None":
+            if convert_format in ["MP3", "FLAC"]:
+                cmd.append("-vn")
+                cmd.extend(self._get_audio_encode_args(convert_format, res_choice, media_info, should_mute))
+            elif convert_format == "None":
                 if target_h:
-                    cmd.extend(["-c:v", "libx264"])
-                    if should_mute:
-                        cmd.append("-an")
-                    else:
-                        cmd.extend(["-c:a", "copy"])
+                    cmd.extend(self._get_video_encode_args(res_choice, media_info))
+                    cmd.extend(self._get_audio_encode_args("None", res_choice, media_info, should_mute))
                 else:
                     if should_mute:
                         cmd.extend(["-c:v", "copy", "-an"])
                     else:
                         cmd.extend(["-c", "copy"])
             elif convert_format == "MP4":
-                cmd.extend(["-c:v", "libx264"])
-                if should_mute:
-                    cmd.append("-an")
+                src_vcodec = (media_info.get("video_codec") or "").lower()
+                if not target_h and "h264" in src_vcodec:
+                    cmd.extend(["-c:v", "copy"])
                 else:
-                    cmd.extend(["-c:a", "aac"])
-            elif convert_format in ["MP3", "FLAC"]:
-                cmd.append("-vn")
-                if convert_format == "MP3":
-                    cmd.extend(["-c:a", "libmp3lame", "-q:a", "2"])
-                elif convert_format == "FLAC":
-                    cmd.extend(["-c:a", "flac"])
+                    cmd.extend(self._get_video_encode_args(res_choice, media_info))
+                cmd.extend(self._get_audio_encode_args("MP4", res_choice, media_info, should_mute))
+
+            if output_path.lower().endswith(".mp4"):
+                cmd.extend(["-movflags", "+faststart"])
 
             cmd.append(output_path)
 
@@ -520,8 +606,8 @@ class AudioRemoverApp:
             duration_secs = 0.0
             error_output = []
 
-            duration_re = re.compile(r"Duration: (\d+):(\d+):(\d+\.\d+)")
-            time_re = re.compile(r"time=(\d+):(\d+):(\d+\.\d+)")
+            duration_re = re.compile(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)")
+            time_re = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
 
             for line in process.stderr:
                 error_output.append(line)
