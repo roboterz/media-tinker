@@ -26,6 +26,7 @@ _ensure_requirements()
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import threading
+import queue
 import imageio_ffmpeg
 
 try:
@@ -41,9 +42,17 @@ class AudioRemoverApp:
         self.root.geometry("820x620")
         self.root.minsize(780, 580)
 
+        self.ui_queue = queue.Queue()
+        self._check_ui_queue()
+
         self.ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
         self.has_video = False
         self._last_loaded_file = None
+        self.current_media_info = None
+        self._cancel_event = threading.Event()
+        self._current_process = None
+
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
         if windnd:
             try:
@@ -63,8 +72,8 @@ class AudioRemoverApp:
         left_container = ttk.Frame(main_container)
         left_container.pack(side="left", fill="both", expand=True, padx=(0, 5))
 
-        # --- Right Sidebar: Media Info ---
-        self.sidebar_frame = ttk.LabelFrame(main_container, text="Media Info", padding=10)
+        # --- Right Sidebar: Source Media Info ---
+        self.sidebar_frame = ttk.LabelFrame(main_container, text="Source Media Info (源文件信息)", padding=10)
         self.sidebar_frame.pack(side="right", fill="both", expand=False, padx=(5, 0))
         self.sidebar_frame.config(width=260)
 
@@ -101,20 +110,53 @@ class AudioRemoverApp:
         ttk.Radiobutton(self.convert_frame, text="MP3", variable=self.convert_var, value="MP3").pack(side="left", padx=5)
         ttk.Radiobutton(self.convert_frame, text="FLAC", variable=self.convert_var, value="FLAC").pack(side="left", padx=5)
 
-        # Resolution Options (for Video)
+        # Video/Audio Options (Resolution & Bitrate)
         self.res_frame = ttk.Frame(self.opts_frame)
         self.res_frame.pack(fill="x", pady=(0, 10))
 
-        ttk.Label(self.res_frame, text="Resolution:").pack(side="left")
+        ttk.Label(self.res_frame, text="Resolution (分辨率):").pack(side="left")
         self.resolution_var = tk.StringVar(value="Original")
         self.cbo_resolution = ttk.Combobox(
             self.res_frame,
             textvariable=self.resolution_var,
             values=["Original", "144p", "240p", "360p", "480p", "720p", "1080p", "1440p"],
             state="disabled",
-            width=12
+            width=10
         )
-        self.cbo_resolution.pack(side="left", padx=5)
+        self.cbo_resolution.pack(side="left", padx=(5, 15))
+
+        ttk.Label(self.res_frame, text="Bitrate (码率):").pack(side="left")
+        self.bitrate_var = tk.StringVar(value="Auto")
+        self.cbo_bitrate = ttk.Combobox(
+            self.res_frame,
+            textvariable=self.bitrate_var,
+            values=["Auto", "150k", "300k", "500k", "800k", "1M", "1.5M", "2M", "3M", "5M", "8M"],
+            state="disabled",
+            width=10
+        )
+        self.cbo_bitrate.pack(side="left", padx=5)
+
+        # Encoder Options (Hardware Acceleration)
+        self.enc_frame = ttk.Frame(self.opts_frame)
+        self.enc_frame.pack(fill="x", pady=(0, 10))
+
+        ttk.Label(self.enc_frame, text="Encoder (编码器):").pack(side="left")
+        self.encoder_var = tk.StringVar(value="Auto (GPU > CPU)")
+        self.cbo_encoder = ttk.Combobox(
+            self.enc_frame,
+            textvariable=self.encoder_var,
+            values=["Auto (GPU > CPU)", "CPU (libx264)"],
+            state="disabled",
+            width=22
+        )
+        self.cbo_encoder.pack(side="left", padx=5)
+
+        self.lbl_gpu_status = ttk.Label(self.enc_frame, text="[Detecting GPU...]", foreground="#666666", font=("Segoe UI", 8))
+        self.lbl_gpu_status.pack(side="left", padx=(5, 0))
+
+        # Initialize hardware encoder state and detect
+        self.available_hw_encoders = []
+        self._detect_hw_encoders_async()
 
         # Mute Option
         self.mute_var = tk.BooleanVar(value=False)
@@ -139,6 +181,24 @@ class AudioRemoverApp:
         self.entry_end = ttk.Entry(self.time_frame, textvariable=self.end_time_var, width=10, state="disabled")
         self.entry_end.pack(side="left", padx=5)
 
+        # Target Output Estimation Preview
+        self.preview_frame = ttk.Frame(self.opts_frame)
+        self.preview_frame.pack(fill="x", pady=(8, 2))
+        self.lbl_target_preview = ttk.Label(
+            self.preview_frame,
+            text="",
+            font=("Segoe UI", 9),
+            foreground="#0066cc",
+            wraplength=480
+        )
+        self.lbl_target_preview.pack(anchor="w")
+
+        # Traces for real-time target feedback
+        self.resolution_var.trace_add("write", lambda *args: self._update_target_preview())
+        self.bitrate_var.trace_add("write", lambda *args: self._update_target_preview())
+        self.mute_var.trace_add("write", lambda *args: self._update_target_preview())
+        self.encoder_var.trace_add("write", lambda *args: self._update_target_preview())
+
         # Operations Frame
         self.ops_frame = ttk.Frame(left_container, padding=10)
         self.ops_frame.pack(fill="both", expand=True)
@@ -150,8 +210,14 @@ class AudioRemoverApp:
         self.progress = ttk.Progressbar(self.ops_frame, mode='determinate', maximum=100)
         self.progress.pack(fill="x", pady=10)
 
-        self.btn_process = ttk.Button(self.ops_frame, text="Process", command=self.start_processing)
-        self.btn_process.pack(pady=10)
+        self.btn_frame = ttk.Frame(self.ops_frame)
+        self.btn_frame.pack(pady=10)
+
+        self.btn_process = ttk.Button(self.btn_frame, text="Process", command=self.start_processing)
+        self.btn_process.pack(side="left", padx=5)
+
+        self.btn_cancel = ttk.Button(self.btn_frame, text="Cancel", command=self.cancel_processing, state="disabled")
+        self.btn_cancel.pack(side="left", padx=5)
 
         # Footer
         ttk.Label(root, text="Uses imageio-ffmpeg", font=("Segoe UI", 8)).pack(side="bottom", pady=5)
@@ -204,12 +270,15 @@ class AudioRemoverApp:
         self.lbl_info_sr.config(text="-")
         self.lbl_info_ch.config(text="-")
         self.has_video = False
+        self.current_media_info = None
         self._update_resolution_state()
+        self._update_target_preview()
 
     def _display_media_info(self, info):
         if info.get("filepath") != self.file_path_var.get().strip():
             return
 
+        self.current_media_info = info
         self.lbl_info_name.config(text=info.get("filename", "-"))
         self.lbl_info_size.config(text=info.get("filesize", "-"))
         self.lbl_info_dur.config(text=info.get("duration", "-"))
@@ -235,17 +304,217 @@ class AudioRemoverApp:
 
         self.has_video = info.get("has_video", False)
         self._update_resolution_state()
+        self._update_target_preview()
 
         if self.trim_var.get() and info.get("duration") and info.get("duration") != "-":
             self.end_time_var.set(info.get("duration"))
 
+    def _detect_hw_encoders_async(self):
+        def worker():
+            candidates = [
+                ("h264_nvenc", "NVIDIA NVENC"),
+                ("h264_qsv", "Intel QSV"),
+                ("h264_amf", "AMD AMF"),
+            ]
+            startupinfo = None
+            if os.name == 'nt':
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+            def probe(enc_info):
+                enc_name, display_name = enc_info
+                try:
+                    cmd = [
+                        self.ffmpeg_exe, "-y", "-f", "lavfi", "-i", "nullsrc=s=256x256:d=0.1:r=25",
+                        "-c:v", enc_name, "-f", "null", "-"
+                    ]
+                    res = subprocess.run(
+                        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        startupinfo=startupinfo, timeout=2.5
+                    )
+                    if res.returncode == 0:
+                        return (enc_name, display_name)
+                except Exception:
+                    pass
+                return None
+
+            threads = []
+            results = [None] * len(candidates)
+
+            def run_probe(idx, cand):
+                results[idx] = probe(cand)
+
+            for i, cand in enumerate(candidates):
+                t = threading.Thread(target=run_probe, args=(i, cand), daemon=True)
+                threads.append(t)
+                t.start()
+
+            for t in threads:
+                t.join()
+
+            available = [r for r in results if r is not None]
+            self.available_hw_encoders = [x[0] for x in available]
+
+            def update_ui():
+                try:
+                    enc_list = ["Auto (GPU > CPU)"]
+                    for enc_name, disp in available:
+                        enc_list.append(f"{disp} ({enc_name})")
+                    enc_list.append("CPU (libx264)")
+                    self.cbo_encoder['values'] = enc_list
+
+                    if available:
+                        names = ", ".join([x[1] for x in available])
+                        self.lbl_gpu_status.config(text=f"[{names} Ready]", foreground="#008000")
+                    else:
+                        self.lbl_gpu_status.config(text="[GPU not detected, CPU only]", foreground="#666666")
+                except Exception:
+                    pass
+
+            self.dispatch_ui(update_ui)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def dispatch_ui(self, fn, *args):
+        self.ui_queue.put((fn, args))
+
+    def _check_ui_queue(self):
+        try:
+            while not self.ui_queue.empty():
+                fn, args = self.ui_queue.get_nowait()
+                fn(*args)
+        except Exception:
+            pass
+        try:
+            self.root.after(40, self._check_ui_queue)
+        except Exception:
+            pass
+
+    def _resolve_encoder(self, encoder_choice, has_custom_bitrate=False):
+        choice_lower = (encoder_choice or "").strip().lower()
+        if choice_lower.startswith("auto"):
+            # When custom video bitrate is set and only AMD AMF is detected, route to libx264
+            # because AMF VBR/CBR driver has known issues adhering to target bitrate
+            if has_custom_bitrate and self.available_hw_encoders and "h264_amf" in self.available_hw_encoders and len(self.available_hw_encoders) == 1:
+                return "libx264"
+            if self.available_hw_encoders:
+                return self.available_hw_encoders[0]
+            return "libx264"
+
+        if "nvenc" in choice_lower:
+            return "h264_nvenc"
+        if "qsv" in choice_lower:
+            return "h264_qsv"
+        if "amf" in choice_lower:
+            return "h264_amf"
+        if "libx264" in choice_lower or "cpu" in choice_lower:
+            return "libx264"
+
+        if self.available_hw_encoders:
+            return self.available_hw_encoders[0]
+        return "libx264"
+
     def _update_resolution_state(self):
         convert_fmt = self.convert_var.get()
+        video_bitrate_values = ["Auto", "150k", "300k", "500k", "800k", "1M", "1.5M", "2M", "3M", "5M", "8M"]
+        audio_bitrate_values = ["Auto", "96k", "128k", "160k", "192k", "256k", "320k"]
+
         if self.has_video and convert_fmt not in ["MP3", "FLAC"]:
             self.cbo_resolution.config(state="readonly")
+            self.cbo_encoder.config(state="readonly")
+            self.cbo_bitrate.config(state="normal")
+            if list(self.cbo_bitrate['values']) != video_bitrate_values:
+                self.cbo_bitrate['values'] = video_bitrate_values
+                if self.bitrate_var.get() not in video_bitrate_values:
+                    self.bitrate_var.set("Auto")
+        elif convert_fmt == "MP3":
+            self.cbo_resolution.config(state="disabled")
+            self.resolution_var.set("Original")
+            self.cbo_encoder.config(state="disabled")
+            self.cbo_bitrate.config(state="normal")
+            if list(self.cbo_bitrate['values']) != audio_bitrate_values:
+                self.cbo_bitrate['values'] = audio_bitrate_values
+                if self.bitrate_var.get() not in audio_bitrate_values:
+                    self.bitrate_var.set("Auto")
         else:
             self.cbo_resolution.config(state="disabled")
             self.resolution_var.set("Original")
+            self.cbo_bitrate.config(state="disabled")
+            self.bitrate_var.set("Auto")
+            self.cbo_encoder.config(state="disabled")
+
+        self._update_target_preview()
+
+    def _update_target_preview(self):
+        if not hasattr(self, 'lbl_target_preview'):
+            return
+        if not self.file_path_var.get().strip() or not getattr(self, 'current_media_info', None):
+            self.lbl_target_preview.config(text="")
+            return
+
+        info = self.current_media_info
+        dur_secs = info.get("duration_secs", 0.0)
+        convert_fmt = self.convert_var.get()
+        res_choice = self.resolution_var.get()
+        br_str = self.bitrate_var.get()
+        target_br = self._parse_custom_bitrate_kbps(br_str)
+        is_muted = self.mute_var.get()
+
+        if convert_fmt == "FLAC":
+            self.lbl_target_preview.config(
+                text="[Target / 预估] Format: FLAC (Lossless Audio / 无损音频) | Encoder: flac",
+                foreground="#0066cc"
+            )
+            return
+
+        if convert_fmt == "MP3":
+            abr = target_br if target_br else 192
+            est_txt = ""
+            if dur_secs > 0:
+                est_mb = (abr * dur_secs) / (8 * 1024)
+                est_txt = f" | Est. Size (预估大小): ~{est_mb:.2f} MB"
+            self.lbl_target_preview.config(
+                text=f"[Target / 预估] Format: MP3 | Audio Bitrate: {abr} kb/s{est_txt}",
+                foreground="#0066cc"
+            )
+            return
+
+        # Video format (None or MP4)
+        if not self.has_video:
+            self.lbl_target_preview.config(text="")
+            return
+
+        src_abr = info.get("audio_bitrate_kbps") or 128
+        if target_br:
+            vbr = target_br
+            abr = 0 if is_muted else (src_abr if convert_fmt == "None" else 128)
+            total_kbps = vbr + abr
+            est_txt = ""
+            if dur_secs > 0:
+                est_mb = (total_kbps * dur_secs) / (8 * 1024)
+                orig_sz = info.get("filesize", "")
+                orig_txt = f" (Original: {orig_sz})" if orig_sz and orig_sz != "-" else ""
+                est_txt = f" | Est. Size (预估大小): ~{est_mb:.2f} MB{orig_txt}"
+            self.lbl_target_preview.config(
+                text=f"[Target / 预估] Resolution: {res_choice} | Video Bitrate: {vbr} kb/s{est_txt}",
+                foreground="#007700"
+            )
+        else:
+            if res_choice == "Original" and convert_fmt == "None" and not is_muted and not self.trim_var.get():
+                self.lbl_target_preview.config(
+                    text="[Target / 预估] Keep Original Quality (Stream Copy / 无损流复制)",
+                    foreground="#666666"
+                )
+            else:
+                res_configs = {
+                    "144p": "~100-160k", "240p": "~200-350k", "360p": "~400-700k",
+                    "480p": "~800-1200k", "720p": "~1.5-2.5M", "1080p": "~3-5M", "1440p": "~6-9M"
+                }
+                typical_br = res_configs.get(res_choice, "Auto CRF")
+                self.lbl_target_preview.config(
+                    text=f"[Target / 预估] Resolution: {res_choice} | Bitrate: Auto ({typical_br})",
+                    foreground="#0066cc"
+                )
 
     def _on_file_path_changed(self, *args):
         path = self.file_path_var.get().strip()
@@ -261,7 +530,7 @@ class AudioRemoverApp:
     def _load_media_info_async(self, file_path):
         def worker():
             info = self._parse_media_info(file_path)
-            self.root.after(0, lambda: self._display_media_info(info))
+            self.dispatch_ui(self._display_media_info, info)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -388,6 +657,26 @@ class AudioRemoverApp:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load dropped file: {e}")
 
+    def cancel_processing(self):
+        self._cancel_event.set()
+        self.btn_cancel.config(state="disabled")
+        self.status_var.set("Cancelling...")
+        proc = self._current_process
+        if proc and proc.poll() is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    def on_closing(self):
+        proc = self._current_process
+        if proc and proc.poll() is None:
+            if messagebox.askyesno("Exit", "Encoding is currently in progress. Do you want to cancel and exit?"):
+                self.cancel_processing()
+                self.root.destroy()
+        else:
+            self.root.destroy()
+
     def toggle_trim(self):
         state = "normal" if self.trim_var.get() else "disabled"
         self.entry_start.config(state=state)
@@ -420,6 +709,8 @@ class AudioRemoverApp:
         should_mute = self.mute_var.get()
         convert_format = self.convert_var.get()
         res_choice = self.resolution_var.get()
+        bitrate_choice = self.bitrate_var.get().strip()
+        encoder_choice = self.encoder_var.get().strip()
 
         trim_args = None
         if self.trim_var.get():
@@ -430,19 +721,22 @@ class AudioRemoverApp:
                 return
             trim_args = (start, end)
 
-        if not should_mute and not trim_args and convert_format == "None" and res_choice == "Original":
+        is_custom_bitrate = bool(self._parse_custom_bitrate_kbps(bitrate_choice))
+        if not should_mute and not trim_args and convert_format == "None" and res_choice == "Original" and not is_custom_bitrate:
             messagebox.showinfo("Info", "Nothing to do! Select an option.")
             return
 
+        self._cancel_event.clear()
         self.btn_process.config(state="disabled")
         self.btn_browse.config(state="disabled")
+        self.btn_cancel.config(state="normal")
         self.progress.config(mode='determinate')
         self.progress['value'] = 0
         self.status_var.set("Processing... 0.0%")
 
         threading.Thread(
             target=self.process_video,
-            args=(input_path, should_mute, convert_format, trim_args, res_choice),
+            args=(input_path, should_mute, convert_format, trim_args, res_choice, bitrate_choice, encoder_choice),
             daemon=True
         ).start()
 
@@ -450,7 +744,25 @@ class AudioRemoverApp:
         self.progress['value'] = percent
         self.status_var.set(f"Processing... {percent:.1f}%")
 
-    def _get_video_encode_args(self, res_choice, media_info):
+    def _parse_custom_bitrate_kbps(self, br_str):
+        if not br_str or br_str.strip().lower() in ["auto", "none", "default", "-", "original"]:
+            return None
+        s = br_str.strip().lower().replace(" ", "").replace("/s", "").replace("ps", "")
+        m = re.match(r"^([\d.]+)\s*(k|m|kb|mb)?$", s)
+        if not m:
+            return None
+        val_str, unit = m.groups()
+        try:
+            val = float(val_str)
+            if unit in ["m", "mb"]:
+                return int(val * 1000)
+            else:
+                return int(val)
+        except Exception:
+            return None
+
+    def _get_video_encode_args(self, res_choice, media_info, bitrate_choice="Auto", encoder="libx264"):
+        target_vbr = self._parse_custom_bitrate_kbps(bitrate_choice)
         res_configs = {
             "144p": {"crf": 28, "maxrate": 160},
             "240p": {"crf": 26, "maxrate": 350},
@@ -476,18 +788,65 @@ class AudioRemoverApp:
             else:
                 maxrate = min(maxrate, max(int(src_vbr * 1.1), 80))
 
-        args = ["-c:v", "libx264", "-preset", "medium", "-crf", str(crf)]
-        if maxrate:
-            args.extend(["-maxrate", f"{maxrate}k", "-bufsize", f"{maxrate * 2}k"])
-        args.extend(["-pix_fmt", "yuv420p"])
-        return args
+        if target_vbr:
+            maxrate = int(target_vbr * 1.5)
+            bufsize = target_vbr * 2
+        else:
+            bufsize = maxrate * 2 if maxrate else None
 
-    def _get_audio_encode_args(self, convert_format, res_choice, media_info, should_mute):
+        if encoder == "h264_nvenc":
+            args = ["-c:v", "h264_nvenc", "-preset", "p4"]
+            if target_vbr:
+                args.extend(["-rc", "vbr", "-b:v", f"{target_vbr}k", "-maxrate", f"{maxrate}k", "-bufsize", f"{bufsize}k"])
+            else:
+                args.extend(["-cq", str(crf)])
+                if maxrate:
+                    args.extend(["-maxrate", f"{maxrate}k", "-bufsize", f"{bufsize}k"])
+            args.extend(["-pix_fmt", "yuv420p"])
+            return args
+
+        elif encoder == "h264_qsv":
+            args = ["-c:v", "h264_qsv", "-preset", "medium"]
+            if target_vbr:
+                args.extend(["-b:v", f"{target_vbr}k", "-maxrate", f"{maxrate}k", "-bufsize", f"{bufsize}k"])
+            else:
+                args.extend(["-global_quality", str(crf)])
+                if maxrate:
+                    args.extend(["-maxrate", f"{maxrate}k", "-bufsize", f"{bufsize}k"])
+            args.extend(["-pix_fmt", "nv12"])
+            return args
+
+        elif encoder == "h264_amf":
+            args = ["-c:v", "h264_amf", "-quality", "balanced"]
+            if target_vbr:
+                args.extend(["-rc", "vbr_peak", "-b:v", f"{target_vbr}k", "-maxrate", f"{maxrate}k", "-bufsize", f"{bufsize}k"])
+            else:
+                args.extend(["-rc", "cqp", "-qp_p", str(crf), "-qp_i", str(crf)])
+                if maxrate:
+                    args.extend(["-maxrate", f"{maxrate}k", "-bufsize", f"{bufsize}k"])
+            args.extend(["-pix_fmt", "yuv420p"])
+            return args
+
+        else:  # libx264
+            args = ["-c:v", "libx264", "-preset", "medium"]
+            if target_vbr:
+                args.extend(["-b:v", f"{target_vbr}k", "-maxrate", f"{maxrate}k", "-bufsize", f"{bufsize}k"])
+            else:
+                args.extend(["-crf", str(crf)])
+                if maxrate:
+                    args.extend(["-maxrate", f"{maxrate}k", "-bufsize", f"{bufsize}k"])
+            args.extend(["-pix_fmt", "yuv420p"])
+            return args
+
+    def _get_audio_encode_args(self, convert_format, res_choice, media_info, should_mute, bitrate_choice="Auto"):
         if should_mute:
             return ["-an"]
 
         if convert_format in ["MP3", "FLAC"]:
             if convert_format == "MP3":
+                target_abr = self._parse_custom_bitrate_kbps(bitrate_choice)
+                if target_abr:
+                    return ["-c:a", "libmp3lame", "-b:a", f"{target_abr}k"]
                 return ["-c:a", "libmp3lame", "-q:a", "2"]
             else:
                 return ["-c:a", "flac"]
@@ -514,7 +873,7 @@ class AudioRemoverApp:
 
         return ["-c:a", "copy"]
 
-    def process_video(self, input_path, should_mute, convert_format, trim_args=None, res_choice="Original"):
+    def process_video(self, input_path, should_mute, convert_format, trim_args=None, res_choice="Original", bitrate_choice="Auto", encoder_choice="Auto"):
         try:
             folder = os.path.dirname(input_path)
             filename = os.path.basename(input_path)
@@ -533,6 +892,7 @@ class AudioRemoverApp:
                 "1440p": 1440
             }
             target_h = res_map.get(res_choice)
+            target_vbr = self._parse_custom_bitrate_kbps(bitrate_choice)
 
             suffix = ""
             if should_mute and convert_format not in ["MP3", "FLAC"]:
@@ -543,6 +903,8 @@ class AudioRemoverApp:
                 suffix += f"_{start_str}_to_{end_str}"
             if target_h and convert_format not in ["MP3", "FLAC"]:
                 suffix += f"_{res_choice}"
+            if target_vbr:
+                suffix += f"_{bitrate_choice.strip().replace(' ', '')}"
             if convert_format != "None":
                 suffix += f"_converted_{convert_format.lower()}"
 
@@ -550,120 +912,185 @@ class AudioRemoverApp:
                 suffix = "_processed"
 
             output_path = os.path.join(folder, f"{name}{suffix}{ext}")
-
             media_info = self._parse_media_info(input_path)
 
-            cmd = [self.ffmpeg_exe, "-y"]
+            resolved_encoder = self._resolve_encoder(encoder_choice, has_custom_bitrate=bool(target_vbr))
 
-            if trim_args:
-                start_t, end_t = trim_args
-                cmd.extend(["-ss", start_t, "-to", end_t])
+            def build_cmd(enc):
+                cmd = [self.ffmpeg_exe, "-y"]
+                if trim_args:
+                    start_t, end_t = trim_args
+                    cmd.extend(["-ss", start_t, "-to", end_t])
 
-            cmd.extend(["-i", input_path])
+                cmd.extend(["-i", input_path])
 
-            if target_h and convert_format not in ["MP3", "FLAC"]:
-                cmd.extend(["-vf", f"scale=-2:{target_h}"])
+                if target_h and convert_format not in ["MP3", "FLAC"]:
+                    cmd.extend(["-vf", f"scale=-2:{target_h}"])
 
-            if convert_format in ["MP3", "FLAC"]:
-                cmd.append("-vn")
-                cmd.extend(self._get_audio_encode_args(convert_format, res_choice, media_info, should_mute))
-            elif convert_format == "None":
-                if target_h:
-                    cmd.extend(self._get_video_encode_args(res_choice, media_info))
-                    cmd.extend(self._get_audio_encode_args("None", res_choice, media_info, should_mute))
-                else:
-                    if should_mute:
-                        cmd.extend(["-c:v", "copy", "-an"])
+                if convert_format in ["MP3", "FLAC"]:
+                    cmd.append("-vn")
+                    cmd.extend(self._get_audio_encode_args(convert_format, res_choice, media_info, should_mute, bitrate_choice))
+                elif convert_format == "None":
+                    if target_h or target_vbr:
+                        cmd.extend(self._get_video_encode_args(res_choice, media_info, bitrate_choice, encoder=enc))
+                        cmd.extend(self._get_audio_encode_args("None", res_choice, media_info, should_mute, bitrate_choice))
                     else:
-                        cmd.extend(["-c", "copy"])
-            elif convert_format == "MP4":
-                src_vcodec = (media_info.get("video_codec") or "").lower()
-                if not target_h and "h264" in src_vcodec:
-                    cmd.extend(["-c:v", "copy"])
-                else:
-                    cmd.extend(self._get_video_encode_args(res_choice, media_info))
-                cmd.extend(self._get_audio_encode_args("MP4", res_choice, media_info, should_mute))
+                        if should_mute:
+                            cmd.extend(["-c:v", "copy", "-an"])
+                        else:
+                            cmd.extend(["-c", "copy"])
+                elif convert_format == "MP4":
+                    src_vcodec = (media_info.get("video_codec") or "").lower()
+                    if not target_h and not target_vbr and "h264" in src_vcodec:
+                        cmd.extend(["-c:v", "copy"])
+                    else:
+                        cmd.extend(self._get_video_encode_args(res_choice, media_info, bitrate_choice, encoder=enc))
+                    cmd.extend(self._get_audio_encode_args("MP4", res_choice, media_info, should_mute, bitrate_choice))
 
-            if output_path.lower().endswith(".mp4"):
-                cmd.extend(["-movflags", "+faststart"])
+                if output_path.lower().endswith(".mp4"):
+                    cmd.extend(["-movflags", "+faststart"])
 
-            cmd.append(output_path)
+                cmd.append(output_path)
+                return cmd
 
-            startupinfo = None
-            if os.name == 'nt':
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            def _cleanup_output():
+                try:
+                    if os.path.exists(output_path):
+                        os.remove(output_path)
+                except Exception:
+                    pass
 
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                startupinfo=startupinfo,
-                encoding='utf-8',
-                errors='replace'
-            )
+            def execute_ffmpeg(enc):
+                if self._cancel_event.is_set():
+                    return -1, "Cancelled by user"
 
-            duration_secs = 0.0
-            error_output = []
+                cmd = build_cmd(enc)
+                startupinfo = None
+                if os.name == 'nt':
+                    startupinfo = subprocess.STARTUPINFO()
+                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
-            duration_re = re.compile(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)")
-            time_re = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
+                try:
+                    self._current_process = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                        startupinfo=startupinfo,
+                        encoding='utf-8',
+                        errors='replace'
+                    )
+                    process = self._current_process
+                except Exception as e:
+                    self._current_process = None
+                    return -1, str(e)
 
-            for line in process.stderr:
-                error_output.append(line)
+                duration_secs = 0.0
+                error_output = []
+                duration_re = re.compile(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)")
+                time_re = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
 
-                if duration_secs == 0.0:
-                    match = duration_re.search(line)
-                    if match:
-                        h, m, s = match.groups()
-                        duration_secs = int(h) * 3600 + int(m) * 60 + float(s)
-                        if trim_args:
+                try:
+                    for line in process.stderr:
+                        if self._cancel_event.is_set():
                             try:
-                                start_t, end_t = trim_args
-                                def parse_time(t_str):
-                                    parts = t_str.split(':')
-                                    return int(parts[0])*3600 + int(parts[1])*60 + float(parts[2])
-                                s_sec = parse_time(start_t)
-                                e_sec = parse_time(end_t)
-                                trim_dur = e_sec - s_sec
-                                if trim_dur < duration_secs:
-                                    duration_secs = trim_dur
+                                process.kill()
                             except Exception:
                                 pass
+                            break
 
-                if duration_secs > 0:
-                    match = time_re.search(line)
-                    if match:
-                        h, m, s = match.groups()
-                        current_secs = int(h) * 3600 + int(m) * 60 + float(s)
-                        percent = (current_secs / duration_secs) * 100
-                        if percent > 100:
-                            percent = 100
-                        self.root.after(0, lambda p=percent: self.update_progress(p))
+                        error_output.append(line)
 
-            process.wait()
+                        if duration_secs == 0.0:
+                            match = duration_re.search(line)
+                            if match:
+                                h, m, s = match.groups()
+                                duration_secs = int(h) * 3600 + int(m) * 60 + float(s)
+                                if trim_args:
+                                    try:
+                                        start_t, end_t = trim_args
+                                        def parse_time(t_str):
+                                            parts = t_str.split(':')
+                                            return int(parts[0])*3600 + int(parts[1])*60 + float(parts[2])
+                                        s_sec = parse_time(start_t)
+                                        e_sec = parse_time(end_t)
+                                        trim_dur = e_sec - s_sec
+                                        if trim_dur < duration_secs:
+                                            duration_secs = trim_dur
+                                    except Exception:
+                                        pass
 
-            if process.returncode == 0:
-                self.root.after(0, lambda p=100.0: self.update_progress(p))
-                self.root.after(0, lambda: self.finish_success(output_path))
+                        if duration_secs > 0:
+                            match = time_re.search(line)
+                            if match:
+                                h, m, s = match.groups()
+                                current_secs = int(h) * 3600 + int(m) * 60 + float(s)
+                                percent = (current_secs / duration_secs) * 100
+                                if percent > 100:
+                                    percent = 100
+                                self.dispatch_ui(self.update_progress, percent)
+                except Exception:
+                    pass
+
+                process.wait()
+                self._current_process = None
+                return process.returncode, "".join(error_output)
+
+            # First attempt with resolved encoder
+            returncode, error_msg = execute_ffmpeg(resolved_encoder)
+
+            if self._cancel_event.is_set():
+                _cleanup_output()
+                self.dispatch_ui(self.finish_cancelled)
+                return
+
+            # Fallback to libx264 if GPU encoding failed
+            if returncode != 0 and resolved_encoder != "libx264" and convert_format not in ["MP3", "FLAC"]:
+                self.dispatch_ui(self.status_var.set, "GPU error. Falling back to CPU (libx264)...")
+                self.dispatch_ui(self.update_progress, 0)
+                _cleanup_output()
+                returncode, error_msg = execute_ffmpeg("libx264")
+
+                if self._cancel_event.is_set():
+                    _cleanup_output()
+                    self.dispatch_ui(self.finish_cancelled)
+                    return
+
+            if returncode == 0:
+                self.dispatch_ui(self.update_progress, 100.0)
+                self.dispatch_ui(self.finish_success, output_path)
             else:
-                error_msg = "".join(error_output)
-                self.root.after(0, lambda: self.finish_error(error_msg))
+                self.dispatch_ui(self.finish_error, error_msg)
 
         except Exception as e:
-            self.root.after(0, lambda: self.finish_error(str(e)))
+            self.dispatch_ui(self.finish_error, str(e))
 
     def finish_success(self, output_path):
         self.btn_process.config(state="normal")
         self.btn_browse.config(state="normal")
-        self.status_var.set(f"Done! Saved to:\n{os.path.basename(output_path)}")
-        messagebox.showinfo("Success", f"Process completed successfully!\nSaved as: {os.path.basename(output_path)}")
+        self.btn_cancel.config(state="disabled")
+        out_info = self._parse_media_info(output_path)
+        out_size = out_info.get("filesize", "-")
+        out_br = out_info.get("bitrate", "-")
+        fname = os.path.basename(output_path)
+        self.status_var.set(f"Done! Saved to:\n{fname}\nSize: {out_size} | Bitrate: {out_br}")
+        messagebox.showinfo(
+            "Success",
+            f"Process completed successfully!\n\nSaved as: {fname}\nSize: {out_size}\nBitrate: {out_br}"
+        )
 
     def finish_error(self, error_msg):
         self.btn_process.config(state="normal")
         self.btn_browse.config(state="normal")
+        self.btn_cancel.config(state="disabled")
         self.status_var.set("Error occurred.")
         messagebox.showerror("Error", f"Failed to process file.\n{error_msg}")
+
+    def finish_cancelled(self):
+        self.btn_process.config(state="normal")
+        self.btn_browse.config(state="normal")
+        self.btn_cancel.config(state="disabled")
+        self.progress['value'] = 0
+        self.status_var.set("Encoding cancelled.")
 
 
 MediaTinkerApp = AudioRemoverApp
