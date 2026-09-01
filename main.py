@@ -64,7 +64,7 @@ class AudioRemoverApp:
         left_container.pack(side="left", fill="both", expand=True, padx=(0, 5))
 
         # --- Right Sidebar: Media Info ---
-        self.sidebar_frame = ttk.LabelFrame(main_container, text="Media Info / 媒体信息", padding=10)
+        self.sidebar_frame = ttk.LabelFrame(main_container, text="Media Info", padding=10)
         self.sidebar_frame.pack(side="right", fill="both", expand=False, padx=(5, 0))
         self.sidebar_frame.config(width=260)
 
@@ -168,7 +168,7 @@ class AudioRemoverApp:
             return lbl_val
 
         # General Section
-        ttk.Label(info_inner, text="[ General / 基本信息 ]", font=("Segoe UI", 9, "bold"), foreground="#0066cc").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        ttk.Label(info_inner, text="[ General ]", font=("Segoe UI", 9, "bold"), foreground="#0066cc").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
         self.lbl_info_name = add_row(1, "Name:")
         self.lbl_info_size = add_row(2, "Size:")
         self.lbl_info_dur = add_row(3, "Duration:")
@@ -178,7 +178,7 @@ class AudioRemoverApp:
         ttk.Separator(info_inner, orient="horizontal").grid(row=5, column=0, columnspan=2, sticky="ew", pady=8)
 
         # Video Section
-        ttk.Label(info_inner, text="[ Video / 视频流 ]", font=("Segoe UI", 9, "bold"), foreground="#0066cc").grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        ttk.Label(info_inner, text="[ Video ]", font=("Segoe UI", 9, "bold"), foreground="#0066cc").grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 4))
         self.lbl_info_vcodec = add_row(7, "Codec:")
         self.lbl_info_res = add_row(8, "Resolution:")
         self.lbl_info_fps = add_row(9, "FPS:")
@@ -187,7 +187,7 @@ class AudioRemoverApp:
         ttk.Separator(info_inner, orient="horizontal").grid(row=10, column=0, columnspan=2, sticky="ew", pady=8)
 
         # Audio Section
-        ttk.Label(info_inner, text="[ Audio / 音频流 ]", font=("Segoe UI", 9, "bold"), foreground="#0066cc").grid(row=11, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        ttk.Label(info_inner, text="[ Audio ]", font=("Segoe UI", 9, "bold"), foreground="#0066cc").grid(row=11, column=0, columnspan=2, sticky="w", pady=(0, 4))
         self.lbl_info_acodec = add_row(12, "Codec:")
         self.lbl_info_sr = add_row(13, "Sample Rate:")
         self.lbl_info_ch = add_row(14, "Channels:")
