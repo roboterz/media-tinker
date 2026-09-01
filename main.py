@@ -147,6 +147,9 @@ class AudioRemoverApp:
         self.tree_menu.add_command(label="🗑️ Remove Selected (删除选中)", command=self.remove_selected_files)
         self.tree_menu.add_command(label="🧹 Clear All (清空列表)", command=self.clear_file_queue)
         self.tree_menu.add_separator()
+        self.tree_menu.add_command(label="🔄 Reset Status (重置为待处理)", command=self.reset_selected_status)
+        self.tree_menu.add_command(label="🔄 Reset All (重置全部为待处理)", command=self.reset_all_status)
+        self.tree_menu.add_separator()
         self.tree_menu.add_command(label="📂 Open File Folder (打开所在文件夹)", command=self._open_selected_file_folder)
 
         def show_context_menu(event):
@@ -154,12 +157,16 @@ class AudioRemoverApp:
             if row_id and row_id not in self.tree.selection():
                 self.tree.selection_set(row_id)
                 self._on_tree_selection_changed()
-            if self.tree.selection():
-                self.tree_menu.entryconfig("🗑️ Remove Selected (删除选中)", state="normal")
-                self.tree_menu.entryconfig("📂 Open File Folder (打开所在文件夹)", state="normal")
-            else:
-                self.tree_menu.entryconfig("🗑️ Remove Selected (删除选中)", state="disabled")
-                self.tree_menu.entryconfig("📂 Open File Folder (打开所在文件夹)", state="disabled")
+            has_sel = bool(self.tree.selection())
+            has_items = bool(self.tree.get_children())
+            state_sel = "normal" if has_sel and not self.is_processing else "disabled"
+            state_items = "normal" if has_items and not self.is_processing else "disabled"
+
+            self.tree_menu.entryconfig("🗑️ Remove Selected (删除选中)", state=state_sel)
+            self.tree_menu.entryconfig("🧹 Clear All (清空列表)", state=state_items)
+            self.tree_menu.entryconfig("🔄 Reset Status (重置为待处理)", state=state_sel)
+            self.tree_menu.entryconfig("🔄 Reset All (重置全部为待处理)", state=state_items)
+            self.tree_menu.entryconfig("📂 Open File Folder (打开所在文件夹)", state=state_sel)
             self.tree_menu.post(event.x_root, event.y_root)
 
         self.tree.bind("<Button-3>", show_context_menu)
@@ -920,6 +927,35 @@ class AudioRemoverApp:
             except Exception:
                 pass
 
+    def _is_item_done(self, item_id):
+        if item_id not in self.file_queue:
+            return False
+        status_str = str(self.file_queue[item_id].get("status", ""))
+        return "Done" in status_str
+
+    def reset_selected_status(self):
+        if self.is_processing:
+            return
+        selected = list(self.tree.selection())
+        for item_id in selected:
+            if item_id in self.file_queue:
+                self.file_queue[item_id]["status"] = "Pending"
+                try:
+                    self.tree.set(item_id, "status", "⏳ Pending")
+                except Exception:
+                    pass
+
+    def reset_all_status(self):
+        if self.is_processing:
+            return
+        for item_id in self.tree.get_children():
+            if item_id in self.file_queue:
+                self.file_queue[item_id]["status"] = "Pending"
+                try:
+                    self.tree.set(item_id, "status", "⏳ Pending")
+                except Exception:
+                    pass
+
     def cancel_processing(self):
         if not self.is_processing:
             return
@@ -975,23 +1011,19 @@ class AudioRemoverApp:
             messagebox.showinfo("Info", "Nothing to do! Please select at least one conversion, mute, resolution, bitrate, or trim option.")
             return
 
-        # Check completed vs pending items
+        # Check completed vs pending items (Skip any files that are already Done)
         items_to_process = []
         for item_id in self.tree.get_children():
             if item_id in self.file_queue:
-                data = self.file_queue[item_id]
-                if data["status"] != "Done":
-                    items_to_process.append((item_id, data))
+                if not self._is_item_done(item_id):
+                    items_to_process.append((item_id, self.file_queue[item_id]))
 
         if not items_to_process:
-            if messagebox.askyesno("Re-process", "All files in the queue are already completed.\nDo you want to re-process all of them?"):
-                for item_id in self.tree.get_children():
-                    if item_id in self.file_queue:
-                        self.file_queue[item_id]["status"] = "Pending"
-                        self.tree.set(item_id, "status", "⏳ Pending")
-                        items_to_process.append((item_id, self.file_queue[item_id]))
-            else:
-                return
+            messagebox.showinfo(
+                "Info",
+                "All files in the queue are already completed (Done).\n(列表中所有文件均已处理完成，无需重复处理。)\n\nTip: You can right-click any item to reset its status if you wish to re-process it.\n(提示：若需重新处理，可在列表中右键选择“重置为待处理”)"
+            )
+            return
 
         self._cancel_event.clear()
         self.is_processing = True
