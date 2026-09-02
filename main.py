@@ -34,11 +34,15 @@ try:
 except ImportError:
     windnd = None
 
+__version__ = "1.0.051"
+
 
 class AudioRemoverApp:
+    VERSION = __version__
+
     def __init__(self, root):
         self.root = root
-        self.root.title("MediaTinker")
+        self.root.title(f"MediaTinker v{__version__}")
         self.root.geometry("880x680")
         self.root.minsize(820, 600)
 
