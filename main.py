@@ -29,6 +29,8 @@ import threading
 import queue
 import imageio_ffmpeg
 
+from i18n import i18n, t
+
 try:
     import windnd
 except ImportError:
@@ -42,7 +44,8 @@ class AudioRemoverApp:
 
     def __init__(self, root):
         self.root = root
-        self.root.title(f"MediaTinker v{__version__}")
+        self.i18n = i18n
+        self.root.title(t("app.title", version=__version__))
         self.root.geometry("880x680")
         self.root.minsize(820, 600)
 
@@ -59,6 +62,7 @@ class AudioRemoverApp:
         self._cancel_event = threading.Event()
         self._current_process = None
         self.file_path_var = tk.StringVar()
+        self._detected_hw_results = None
 
         # Serialized probe queue to prevent concurrent subprocess/GIL clashes
         self.probe_queue = queue.Queue()
@@ -79,6 +83,9 @@ class AudioRemoverApp:
         style.configure("TButton", padding=5)
         style.configure("TLabel", padding=3)
 
+        # Top Menu Bar
+        self._create_menu_bar()
+
         # Main Layout Container (Left: Controls, Right: Media Info Sidebar)
         main_container = ttk.Frame(root, padding=8)
         main_container.pack(fill="both", expand=True)
@@ -87,15 +94,15 @@ class AudioRemoverApp:
         left_container.pack(side="left", fill="both", expand=True, padx=(0, 5))
 
         # --- Right Sidebar: Source Media Info ---
-        self.sidebar_frame = ttk.LabelFrame(main_container, text="Source Media Info (源文件信息)", padding=8)
+        self.sidebar_frame = ttk.LabelFrame(main_container, text=t("sidebar.title"), padding=8)
         self.sidebar_frame.pack(side="right", fill="both", expand=False, padx=(5, 0))
         self.sidebar_frame.config(width=260)
 
         self._build_sidebar(self.sidebar_frame)
 
         # --- Left Container Controls ---
-        # File Queue Frame (待处理文件列表)
-        self.files_frame = ttk.LabelFrame(left_container, text="File Queue (待处理文件列表 - 可拖拽多个文件至此)", padding=8)
+        # File Queue Frame
+        self.files_frame = ttk.LabelFrame(left_container, text=t("queue.title"), padding=8)
         self.files_frame.pack(fill="both", expand=True, pady=(0, 6))
 
         # Treeview + Scrollbar container
@@ -109,10 +116,10 @@ class AudioRemoverApp:
             selectmode="extended",
             height=5
         )
-        self.tree.heading("name", text="File Name (文件名)")
-        self.tree.heading("size", text="Size (大小)")
-        self.tree.heading("duration", text="Duration (时长)")
-        self.tree.heading("status", text="Status (状态)")
+        self.tree.heading("name", text=t("queue.col_name"))
+        self.tree.heading("size", text=t("queue.col_size"))
+        self.tree.heading("duration", text=t("queue.col_duration"))
+        self.tree.heading("status", text=t("queue.col_status"))
 
         self.tree.column("name", width=250, minwidth=140, anchor="w")
         self.tree.column("size", width=80, minwidth=60, anchor="center")
@@ -129,18 +136,33 @@ class AudioRemoverApp:
         toolbar_frame = ttk.Frame(self.files_frame)
         toolbar_frame.pack(fill="x", pady=(6, 0))
 
-        self.btn_add = ttk.Button(toolbar_frame, text="➕ Add Files (添加文件)", command=self.browse_files)
+        self.btn_add = ttk.Button(toolbar_frame, text=t("queue.btn_add"), command=self.browse_files)
         self.btn_add.pack(side="left", padx=(0, 4))
         self.btn_browse = self.btn_add  # compatibility alias
 
-        self.btn_remove = ttk.Button(toolbar_frame, text="🗑️ Remove (删除选中)", command=self.remove_selected_files)
+        self.btn_remove = ttk.Button(toolbar_frame, text=t("queue.btn_remove"), command=self.remove_selected_files)
         self.btn_remove.pack(side="left", padx=4)
 
-        self.btn_clear = ttk.Button(toolbar_frame, text="🧹 Clear All (清空列表)", command=self.clear_file_queue)
+        self.btn_clear = ttk.Button(toolbar_frame, text=t("queue.btn_clear"), command=self.clear_file_queue)
         self.btn_clear.pack(side="left", padx=4)
 
-        self.lbl_queue_count = ttk.Label(toolbar_frame, text="Total: 0 files (空列表)", foreground="#666666", font=("Segoe UI", 8))
-        self.lbl_queue_count.pack(side="right", padx=(4, 0))
+        # Language dropdown selector in UI
+        self.cbo_lang = ttk.Combobox(
+            toolbar_frame,
+            values=list(self.i18n.SUPPORTED_LOCALES.values()),
+            state="readonly",
+            width=9,
+            font=("Segoe UI", 8)
+        )
+        self.cbo_lang.set(self.i18n.SUPPORTED_LOCALES.get(self.i18n.get_locale(), "简体中文"))
+        self.cbo_lang.bind("<<ComboboxSelected>>", self._on_lang_combo_selected)
+        self.cbo_lang.pack(side="right", padx=(2, 0))
+
+        self.lbl_lang_icon = ttk.Label(toolbar_frame, text="🌐", font=("Segoe UI", 9))
+        self.lbl_lang_icon.pack(side="right", padx=(4, 0))
+
+        self.lbl_queue_count = ttk.Label(toolbar_frame, text=t("queue.count_empty"), foreground="#666666", font=("Segoe UI", 8))
+        self.lbl_queue_count.pack(side="right", padx=(4, 6))
 
         # Context Menu & Keybindings for Treeview
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_selection_changed)
@@ -148,13 +170,13 @@ class AudioRemoverApp:
         self.tree.bind("<BackSpace>", lambda e: self.remove_selected_files())
 
         self.tree_menu = tk.Menu(self.root, tearoff=0)
-        self.tree_menu.add_command(label="🗑️ Remove Selected (删除选中)", command=self.remove_selected_files)
-        self.tree_menu.add_command(label="🧹 Clear All (清空列表)", command=self.clear_file_queue)
+        self.tree_menu.add_command(label=t("menu.remove_selected"), command=self.remove_selected_files)
+        self.tree_menu.add_command(label=t("menu.clear_all"), command=self.clear_file_queue)
         self.tree_menu.add_separator()
-        self.tree_menu.add_command(label="🔄 Reset Status (重置为待处理)", command=self.reset_selected_status)
-        self.tree_menu.add_command(label="🔄 Reset All (重置全部为待处理)", command=self.reset_all_status)
+        self.tree_menu.add_command(label=t("menu.reset_status"), command=self.reset_selected_status)
+        self.tree_menu.add_command(label=t("menu.reset_all"), command=self.reset_all_status)
         self.tree_menu.add_separator()
-        self.tree_menu.add_command(label="📂 Open File Folder (打开所在文件夹)", command=self._open_selected_file_folder)
+        self.tree_menu.add_command(label=t("menu.open_folder"), command=self._open_selected_file_folder)
 
         def show_context_menu(event):
             row_id = self.tree.identify_row(event.y)
@@ -166,17 +188,17 @@ class AudioRemoverApp:
             state_sel = "normal" if has_sel and not self.is_processing else "disabled"
             state_items = "normal" if has_items and not self.is_processing else "disabled"
 
-            self.tree_menu.entryconfig("🗑️ Remove Selected (删除选中)", state=state_sel)
-            self.tree_menu.entryconfig("🧹 Clear All (清空列表)", state=state_items)
-            self.tree_menu.entryconfig("🔄 Reset Status (重置为待处理)", state=state_sel)
-            self.tree_menu.entryconfig("🔄 Reset All (重置全部为待处理)", state=state_items)
-            self.tree_menu.entryconfig("📂 Open File Folder (打开所在文件夹)", state=state_sel)
+            self.tree_menu.entryconfig(0, state=state_sel)
+            self.tree_menu.entryconfig(1, state=state_items)
+            self.tree_menu.entryconfig(3, state=state_sel)
+            self.tree_menu.entryconfig(4, state=state_items)
+            self.tree_menu.entryconfig(6, state=state_sel)
             self.tree_menu.post(event.x_root, event.y_root)
 
         self.tree.bind("<Button-3>", show_context_menu)
 
         # Options Frame
-        self.opts_frame = ttk.LabelFrame(left_container, text="Options", padding=10)
+        self.opts_frame = ttk.LabelFrame(left_container, text=t("options.title"), padding=10)
         self.opts_frame.pack(fill="x", pady=5)
 
         # Convert Options
@@ -186,7 +208,8 @@ class AudioRemoverApp:
         self.convert_frame = ttk.Frame(self.opts_frame)
         self.convert_frame.pack(fill="x", pady=(0, 10))
 
-        ttk.Label(self.convert_frame, text="Convert to:").pack(side="left")
+        self.lbl_convert_to = ttk.Label(self.convert_frame, text=t("options.convert_to"))
+        self.lbl_convert_to.pack(side="left")
         ttk.Radiobutton(self.convert_frame, text="None", variable=self.convert_var, value="None").pack(side="left", padx=5)
         ttk.Radiobutton(self.convert_frame, text="MP4", variable=self.convert_var, value="MP4").pack(side="left", padx=5)
         ttk.Radiobutton(self.convert_frame, text="MP3", variable=self.convert_var, value="MP3").pack(side="left", padx=5)
@@ -196,7 +219,8 @@ class AudioRemoverApp:
         self.res_frame = ttk.Frame(self.opts_frame)
         self.res_frame.pack(fill="x", pady=(0, 10))
 
-        ttk.Label(self.res_frame, text="Resolution (分辨率):").pack(side="left")
+        self.lbl_resolution = ttk.Label(self.res_frame, text=t("options.resolution"))
+        self.lbl_resolution.pack(side="left")
         self.resolution_var = tk.StringVar(value="Original")
         self.cbo_resolution = ttk.Combobox(
             self.res_frame,
@@ -207,7 +231,8 @@ class AudioRemoverApp:
         )
         self.cbo_resolution.pack(side="left", padx=(5, 15))
 
-        ttk.Label(self.res_frame, text="Bitrate (码率):").pack(side="left")
+        self.lbl_bitrate = ttk.Label(self.res_frame, text=t("options.bitrate"))
+        self.lbl_bitrate.pack(side="left")
         self.bitrate_var = tk.StringVar(value="Auto")
         self.cbo_bitrate = ttk.Combobox(
             self.res_frame,
@@ -222,18 +247,19 @@ class AudioRemoverApp:
         self.enc_frame = ttk.Frame(self.opts_frame)
         self.enc_frame.pack(fill="x", pady=(0, 10))
 
-        ttk.Label(self.enc_frame, text="Encoder (编码器):").pack(side="left")
-        self.encoder_var = tk.StringVar(value="Auto (GPU > CPU)")
+        self.lbl_encoder = ttk.Label(self.enc_frame, text=t("options.encoder"))
+        self.lbl_encoder.pack(side="left")
+        self.encoder_var = tk.StringVar(value=t("options.encoder_auto"))
         self.cbo_encoder = ttk.Combobox(
             self.enc_frame,
             textvariable=self.encoder_var,
-            values=["Auto (GPU > CPU)", "CPU (libx264)"],
+            values=[t("options.encoder_auto"), t("options.encoder_cpu")],
             state="disabled",
             width=22
         )
         self.cbo_encoder.pack(side="left", padx=5)
 
-        self.lbl_gpu_status = ttk.Label(self.enc_frame, text="[Detecting GPU...]", foreground="#666666", font=("Segoe UI", 8))
+        self.lbl_gpu_status = ttk.Label(self.enc_frame, text=t("options.detecting_gpu"), foreground="#666666", font=("Segoe UI", 8))
         self.lbl_gpu_status.pack(side="left", padx=(5, 0))
 
         # Initialize hardware encoder state and detect
@@ -242,23 +268,25 @@ class AudioRemoverApp:
 
         # Mute Option
         self.mute_var = tk.BooleanVar(value=False)
-        self.chk_mute = ttk.Checkbutton(self.opts_frame, text="Remove Audio", variable=self.mute_var)
+        self.chk_mute = ttk.Checkbutton(self.opts_frame, text=t("options.mute"), variable=self.mute_var)
         self.chk_mute.pack(anchor="w", pady=(0, 5))
 
         # Trim Option
         self.trim_var = tk.BooleanVar(value=False)
-        self.chk_trim = ttk.Checkbutton(self.opts_frame, text="Trim Media", variable=self.trim_var, command=self.toggle_trim)
+        self.chk_trim = ttk.Checkbutton(self.opts_frame, text=t("options.trim"), variable=self.trim_var, command=self.toggle_trim)
         self.chk_trim.pack(anchor="w", pady=(0, 5))
 
         self.time_frame = ttk.Frame(self.opts_frame)
         self.time_frame.pack(fill="x", padx=20)
 
-        ttk.Label(self.time_frame, text="Start Time (HH:MM:SS):").pack(side="left")
+        self.lbl_start_time = ttk.Label(self.time_frame, text=t("options.start_time"))
+        self.lbl_start_time.pack(side="left")
         self.start_time_var = tk.StringVar(value="00:00:00")
         self.entry_start = ttk.Entry(self.time_frame, textvariable=self.start_time_var, width=10, state="disabled")
         self.entry_start.pack(side="left", padx=(5, 20))
 
-        ttk.Label(self.time_frame, text="End Time (HH:MM:SS):").pack(side="left")
+        self.lbl_end_time = ttk.Label(self.time_frame, text=t("options.end_time"))
+        self.lbl_end_time.pack(side="left")
         self.end_time_var = tk.StringVar(value="00:00:10")
         self.entry_end = ttk.Entry(self.time_frame, textvariable=self.end_time_var, width=10, state="disabled")
         self.entry_end.pack(side="left", padx=5)
@@ -285,7 +313,7 @@ class AudioRemoverApp:
         self.ops_frame = ttk.Frame(left_container, padding=6)
         self.ops_frame.pack(fill="x", expand=False, pady=4)
 
-        self.status_var = tk.StringVar(value="Ready (就绪)")
+        self.status_var = tk.StringVar(value=t("ops.ready"))
         self.lbl_status = ttk.Label(self.ops_frame, textvariable=self.status_var, font=("Segoe UI", 10), wraplength=520)
         self.lbl_status.pack(pady=6)
 
@@ -295,14 +323,169 @@ class AudioRemoverApp:
         self.btn_frame = ttk.Frame(self.ops_frame)
         self.btn_frame.pack(pady=6)
 
-        self.btn_process = ttk.Button(self.btn_frame, text="Process (批量处理)", command=self.start_batch_processing)
+        self.btn_process = ttk.Button(self.btn_frame, text=t("ops.process"), command=self.start_batch_processing)
         self.btn_process.pack(side="left", padx=5)
 
-        self.btn_cancel = ttk.Button(self.btn_frame, text="Cancel (取消)", command=self.cancel_processing, state="disabled")
+        self.btn_cancel = ttk.Button(self.btn_frame, text=t("ops.cancel"), command=self.cancel_processing, state="disabled")
         self.btn_cancel.pack(side="left", padx=5)
 
         # Footer
-        ttk.Label(root, text="Uses imageio-ffmpeg", font=("Segoe UI", 8)).pack(side="bottom", pady=5)
+        self.lbl_footer = ttk.Label(root, text=t("ops.footer"), font=("Segoe UI", 8))
+        self.lbl_footer.pack(side="bottom", pady=5)
+
+        # Register i18n callback
+        self.i18n.register_callback(self._on_locale_changed)
+
+    def _create_menu_bar(self):
+        self.menubar = tk.Menu(self.root)
+
+        # File Menu
+        self.file_menu = tk.Menu(self.menubar, tearoff=0)
+        self.file_menu.add_command(label=t("menu.add_files"), command=self.browse_files)
+        self.file_menu.add_command(label=t("menu.clear_queue"), command=self.clear_file_queue)
+        self.file_menu.add_separator()
+        self.file_menu.add_command(label=t("menu.exit"), command=self.on_closing)
+        self.menubar.add_cascade(label=t("menu.file"), menu=self.file_menu)
+
+        # Language Menu
+        self.lang_menu = tk.Menu(self.menubar, tearoff=0)
+        self.lang_var = tk.StringVar(value=self.i18n.get_locale())
+        for code, name in self.i18n.SUPPORTED_LOCALES.items():
+            self.lang_menu.add_radiobutton(
+                label=name,
+                variable=self.lang_var,
+                value=code,
+                command=lambda c=code: self.change_language(c)
+            )
+        self.menubar.add_cascade(label=t("menu.language"), menu=self.lang_menu)
+
+        self.root.config(menu=self.menubar)
+
+    def _on_lang_combo_selected(self, event=None):
+        selected_display = self.cbo_lang.get()
+        for code, name in self.i18n.SUPPORTED_LOCALES.items():
+            if name == selected_display:
+                self.change_language(code)
+                break
+
+    def change_language(self, locale_code):
+        if locale_code != self.i18n.get_locale():
+            self.i18n.set_locale(locale_code)
+
+    def _on_locale_changed(self, locale_code):
+        self.lang_var.set(locale_code)
+        display_name = self.i18n.SUPPORTED_LOCALES.get(locale_code, "English")
+        self.cbo_lang.set(display_name)
+        self._update_ui_language()
+
+    def _update_ui_language(self):
+        # Window title
+        self.root.title(t("app.title", version=self.VERSION))
+
+        # Menubar
+        try:
+            self.menubar.entryconfig(1, label=t("menu.file"))
+            self.menubar.entryconfig(2, label=t("menu.language"))
+            self.file_menu.entryconfig(0, label=t("menu.add_files"))
+            self.file_menu.entryconfig(1, label=t("menu.clear_queue"))
+            self.file_menu.entryconfig(3, label=t("menu.exit"))
+        except Exception:
+            pass
+
+        # Sidebar
+        self.sidebar_frame.config(text=t("sidebar.title"))
+        self.lbl_sec_general.config(text=t("sidebar.general"))
+        self.lbl_title_name.config(text=t("sidebar.name"))
+        self.lbl_title_size.config(text=t("sidebar.size"))
+        self.lbl_title_dur.config(text=t("sidebar.duration"))
+        self.lbl_title_br.config(text=t("sidebar.bitrate"))
+
+        self.lbl_sec_video.config(text=t("sidebar.video"))
+        self.lbl_title_vcodec.config(text=t("sidebar.codec"))
+        self.lbl_title_res.config(text=t("sidebar.resolution"))
+        self.lbl_title_fps.config(text=t("sidebar.fps"))
+
+        self.lbl_sec_audio.config(text=t("sidebar.audio"))
+        self.lbl_title_acodec.config(text=t("sidebar.codec"))
+        self.lbl_title_sr.config(text=t("sidebar.sample_rate"))
+        self.lbl_title_ch.config(text=t("sidebar.channels"))
+
+        if not self.current_media_info:
+            self._clear_media_info()
+        else:
+            self._display_media_info(self.current_media_info)
+
+        # File Queue
+        self.files_frame.config(text=t("queue.title"))
+        self.tree.heading("name", text=t("queue.col_name"))
+        self.tree.heading("size", text=t("queue.col_size"))
+        self.tree.heading("duration", text=t("queue.col_duration"))
+        self.tree.heading("status", text=t("queue.col_status"))
+
+        self.btn_add.config(text=t("queue.btn_add"))
+        self.btn_remove.config(text=t("queue.btn_remove"))
+        self.btn_clear.config(text=t("queue.btn_clear"))
+        self._update_queue_summary()
+
+        # Context Menu
+        try:
+            self.tree_menu.entryconfig(0, label=t("menu.remove_selected"))
+            self.tree_menu.entryconfig(1, label=t("menu.clear_all"))
+            self.tree_menu.entryconfig(3, label=t("menu.reset_status"))
+            self.tree_menu.entryconfig(4, label=t("menu.reset_all"))
+            self.tree_menu.entryconfig(6, label=t("menu.open_folder"))
+        except Exception:
+            pass
+
+        # Update status in tree for existing items
+        for item_id, data in self.file_queue.items():
+            st = data.get("status", "")
+            if "Pending" in st or "待处理" in st:
+                data["status"] = "Pending"
+                try:
+                    self.tree.set(item_id, "status", t("queue.status_pending"))
+                except Exception:
+                    pass
+            elif "Done" in st or "完成" in st:
+                data["status"] = "Done"
+                try:
+                    self.tree.set(item_id, "status", t("queue.status_done"))
+                except Exception:
+                    pass
+            elif "Failed" in st or "失败" in st:
+                data["status"] = "Failed"
+                try:
+                    self.tree.set(item_id, "status", t("queue.status_failed"))
+                except Exception:
+                    pass
+            elif "Cancelled" in st or "取消" in st:
+                data["status"] = "Cancelled"
+                try:
+                    self.tree.set(item_id, "status", t("queue.status_cancelled"))
+                except Exception:
+                    pass
+
+        # Options Frame
+        self.opts_frame.config(text=t("options.title"))
+        self.lbl_convert_to.config(text=t("options.convert_to"))
+        self.lbl_resolution.config(text=t("options.resolution"))
+        self.lbl_bitrate.config(text=t("options.bitrate"))
+        self.lbl_encoder.config(text=t("options.encoder"))
+        self.chk_mute.config(text=t("options.mute"))
+        self.chk_trim.config(text=t("options.trim"))
+        self.lbl_start_time.config(text=t("options.start_time"))
+        self.lbl_end_time.config(text=t("options.end_time"))
+
+        self._update_encoder_display()
+        self._update_target_preview()
+
+        # Operations
+        self.btn_process.config(text=t("ops.process"))
+        self.btn_cancel.config(text=t("ops.cancel"))
+        self.lbl_footer.config(text=t("ops.footer"))
+
+        if not self.is_processing and ("Ready" in self.status_var.get() or "就绪" in self.status_var.get()):
+            self.status_var.set(t("ops.ready"))
 
     def _build_sidebar(self, parent):
         info_inner = ttk.Frame(parent)
@@ -313,32 +496,35 @@ class AudioRemoverApp:
             lbl_title.grid(row=row_idx, column=0, sticky="nw", pady=2)
             lbl_val = ttk.Label(info_inner, text="-", font=("Segoe UI", 9), wraplength=160)
             lbl_val.grid(row=row_idx, column=1, sticky="nw", padx=(5, 0), pady=2)
-            return lbl_val
+            return lbl_title, lbl_val
 
         # General Section
-        ttk.Label(info_inner, text="[ General ]", font=("Segoe UI", 9, "bold"), foreground="#0066cc").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
-        self.lbl_info_name = add_row(1, "Name:")
-        self.lbl_info_size = add_row(2, "Size:")
-        self.lbl_info_dur = add_row(3, "Duration:")
-        self.lbl_info_br = add_row(4, "Bitrate:")
+        self.lbl_sec_general = ttk.Label(info_inner, text=t("sidebar.general"), font=("Segoe UI", 9, "bold"), foreground="#0066cc")
+        self.lbl_sec_general.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        self.lbl_title_name, self.lbl_info_name = add_row(1, t("sidebar.name"))
+        self.lbl_title_size, self.lbl_info_size = add_row(2, t("sidebar.size"))
+        self.lbl_title_dur, self.lbl_info_dur = add_row(3, t("sidebar.duration"))
+        self.lbl_title_br, self.lbl_info_br = add_row(4, t("sidebar.bitrate"))
 
         # Separator
         ttk.Separator(info_inner, orient="horizontal").grid(row=5, column=0, columnspan=2, sticky="ew", pady=8)
 
         # Video Section
-        ttk.Label(info_inner, text="[ Video ]", font=("Segoe UI", 9, "bold"), foreground="#0066cc").grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 4))
-        self.lbl_info_vcodec = add_row(7, "Codec:")
-        self.lbl_info_res = add_row(8, "Resolution:")
-        self.lbl_info_fps = add_row(9, "FPS:")
+        self.lbl_sec_video = ttk.Label(info_inner, text=t("sidebar.video"), font=("Segoe UI", 9, "bold"), foreground="#0066cc")
+        self.lbl_sec_video.grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        self.lbl_title_vcodec, self.lbl_info_vcodec = add_row(7, t("sidebar.codec"))
+        self.lbl_title_res, self.lbl_info_res = add_row(8, t("sidebar.resolution"))
+        self.lbl_title_fps, self.lbl_info_fps = add_row(9, t("sidebar.fps"))
 
         # Separator
         ttk.Separator(info_inner, orient="horizontal").grid(row=10, column=0, columnspan=2, sticky="ew", pady=8)
 
         # Audio Section
-        ttk.Label(info_inner, text="[ Audio ]", font=("Segoe UI", 9, "bold"), foreground="#0066cc").grid(row=11, column=0, columnspan=2, sticky="w", pady=(0, 4))
-        self.lbl_info_acodec = add_row(12, "Codec:")
-        self.lbl_info_sr = add_row(13, "Sample Rate:")
-        self.lbl_info_ch = add_row(14, "Channels:")
+        self.lbl_sec_audio = ttk.Label(info_inner, text=t("sidebar.audio"), font=("Segoe UI", 9, "bold"), foreground="#0066cc")
+        self.lbl_sec_audio.grid(row=11, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        self.lbl_title_acodec, self.lbl_info_acodec = add_row(12, t("sidebar.codec"))
+        self.lbl_title_sr, self.lbl_info_sr = add_row(13, t("sidebar.sample_rate"))
+        self.lbl_title_ch, self.lbl_info_ch = add_row(14, t("sidebar.channels"))
 
     def _clear_media_info(self):
         self.lbl_info_name.config(text="-")
@@ -368,23 +554,24 @@ class AudioRemoverApp:
         self.lbl_info_dur.config(text=info.get("duration", "-"))
         self.lbl_info_br.config(text=info.get("bitrate", "-"))
 
+        none_txt = t("sidebar.none")
         if info.get("has_video"):
             self.lbl_info_vcodec.config(text=info.get("video_codec", "-"))
             self.lbl_info_res.config(text=info.get("resolution", "-"))
             self.lbl_info_fps.config(text=info.get("fps", "-"))
         else:
-            self.lbl_info_vcodec.config(text="None")
-            self.lbl_info_res.config(text="None")
-            self.lbl_info_fps.config(text="None")
+            self.lbl_info_vcodec.config(text=none_txt)
+            self.lbl_info_res.config(text=none_txt)
+            self.lbl_info_fps.config(text=none_txt)
 
         if info.get("has_audio"):
             self.lbl_info_acodec.config(text=info.get("audio_codec", "-"))
             self.lbl_info_sr.config(text=info.get("sample_rate", "-"))
             self.lbl_info_ch.config(text=info.get("channels", "-"))
         else:
-            self.lbl_info_acodec.config(text="None")
-            self.lbl_info_sr.config(text="None")
-            self.lbl_info_ch.config(text="None")
+            self.lbl_info_acodec.config(text=none_txt)
+            self.lbl_info_sr.config(text=none_txt)
+            self.lbl_info_ch.config(text=none_txt)
 
         self.has_video = info.get("has_video", False)
         self._update_resolution_state()
@@ -429,26 +616,41 @@ class AudioRemoverApp:
 
             available = [r for r in results if r is not None]
             self.available_hw_encoders = [x[0] for x in available]
+            self._detected_hw_results = available
 
             def update_ui():
-                try:
-                    enc_list = ["Auto (GPU > CPU)"]
-                    for enc_name, disp in available:
-                        enc_list.append(f"{disp} ({enc_name})")
-                    enc_list.append("CPU (libx264)")
-                    self.cbo_encoder['values'] = enc_list
-
-                    if available:
-                        names = ", ".join([x[1] for x in available])
-                        self.lbl_gpu_status.config(text=f"[{names} Ready]", foreground="#008000")
-                    else:
-                        self.lbl_gpu_status.config(text="[GPU not detected, CPU only]", foreground="#666666")
-                except Exception:
-                    pass
+                self._update_encoder_display(available)
 
             self.dispatch_ui(update_ui)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _update_encoder_display(self, available=None):
+        if available is not None:
+            self._detected_hw_results = available
+        available = getattr(self, '_detected_hw_results', None)
+        try:
+            enc_list = [t("options.encoder_auto")]
+            if available:
+                for enc_name, disp in available:
+                    enc_list.append(f"{disp} ({enc_name})")
+            enc_list.append(t("options.encoder_cpu"))
+            self.cbo_encoder['values'] = enc_list
+
+            curr_val = self.encoder_var.get()
+            if not curr_val or "auto" in curr_val.lower() or "自动" in curr_val:
+                self.encoder_var.set(t("options.encoder_auto"))
+            elif "libx264" in curr_val or "cpu" in curr_val.lower():
+                self.encoder_var.set(t("options.encoder_cpu"))
+
+            if available is not None:
+                if available:
+                    names = ", ".join([x[1] for x in available])
+                    self.lbl_gpu_status.config(text=t("options.gpu_ready", names=names), foreground="#008000")
+                else:
+                    self.lbl_gpu_status.config(text=t("options.gpu_none"), foreground="#666666")
+        except Exception:
+            pass
 
     def dispatch_ui(self, fn, *args):
         self.ui_queue.put((fn, args))
@@ -467,7 +669,7 @@ class AudioRemoverApp:
 
     def _resolve_encoder(self, encoder_choice, has_custom_bitrate=False):
         choice_lower = (encoder_choice or "").strip().lower()
-        if choice_lower.startswith("auto"):
+        if choice_lower.startswith("auto") or "自动" in choice_lower or "gpu" in choice_lower:
             # When custom video bitrate is set and only AMD AMF is detected, route to libx264
             # because AMF VBR/CBR driver has known issues adhering to target bitrate
             if has_custom_bitrate and self.available_hw_encoders and "h264_amf" in self.available_hw_encoders and len(self.available_hw_encoders) == 1:
@@ -537,7 +739,7 @@ class AudioRemoverApp:
 
         if convert_fmt == "FLAC":
             self.lbl_target_preview.config(
-                text="[Target / 预估] Format: FLAC (Lossless Audio / 无损音频) | Encoder: flac",
+                text=t("options.preview_flac"),
                 foreground="#0066cc"
             )
             return
@@ -547,9 +749,9 @@ class AudioRemoverApp:
             est_txt = ""
             if dur_secs > 0:
                 est_mb = (abr * dur_secs) / (8 * 1024)
-                est_txt = f" | Est. Size (预估大小): ~{est_mb:.2f} MB"
+                est_txt = t("options.est_size", size=est_mb)
             self.lbl_target_preview.config(
-                text=f"[Target / 预估] Format: MP3 | Audio Bitrate: {abr} kb/s{est_txt}",
+                text=t("options.preview_mp3", abr=abr, est_txt=est_txt),
                 foreground="#0066cc"
             )
             return
@@ -568,16 +770,16 @@ class AudioRemoverApp:
             if dur_secs > 0:
                 est_mb = (total_kbps * dur_secs) / (8 * 1024)
                 orig_sz = info.get("filesize", "")
-                orig_txt = f" (Original: {orig_sz})" if orig_sz and orig_sz != "-" else ""
-                est_txt = f" | Est. Size (预估大小): ~{est_mb:.2f} MB{orig_txt}"
+                orig_txt = t("options.est_orig_size", size=orig_sz) if orig_sz and orig_sz != "-" else ""
+                est_txt = t("options.est_size", size=est_mb) + orig_txt
             self.lbl_target_preview.config(
-                text=f"[Target / 预估] Resolution: {res_choice} | Video Bitrate: {vbr} kb/s{est_txt}",
+                text=t("options.preview_video", res=res_choice, vbr=vbr, est_txt=est_txt),
                 foreground="#007700"
             )
         else:
-            if res_choice == "Original" and convert_fmt == "None" and not is_muted and not self.trim_var.get():
+            if res_choice in ["Original", "保持原分辨率", t("options.res_original")] and convert_fmt == "None" and not is_muted and not self.trim_var.get():
                 self.lbl_target_preview.config(
-                    text="[Target / 预估] Keep Original Quality (Stream Copy / 无损流复制)",
+                    text=t("options.preview_original"),
                     foreground="#666666"
                 )
             else:
@@ -587,7 +789,7 @@ class AudioRemoverApp:
                 }
                 typical_br = res_configs.get(res_choice, "Auto CRF")
                 self.lbl_target_preview.config(
-                    text=f"[Target / 预估] Resolution: {res_choice} | Bitrate: Auto ({typical_br})",
+                    text=t("options.preview_auto_bitrate", res=res_choice, typical_br=typical_br),
                     foreground="#0066cc"
                 )
 
@@ -641,9 +843,10 @@ class AudioRemoverApp:
         self.probe_queue.put((item_id, path))
 
     def _display_loading_media_info(self, filename):
+        load_txt = t("sidebar.loading")
         self.lbl_info_name.config(text=filename)
-        self.lbl_info_size.config(text="Loading...")
-        self.lbl_info_dur.config(text="Loading...")
+        self.lbl_info_size.config(text=load_txt)
+        self.lbl_info_dur.config(text=load_txt)
         self.lbl_info_br.config(text="-")
         self.lbl_info_vcodec.config(text="-")
         self.lbl_info_res.config(text="-")
@@ -799,14 +1002,14 @@ class AudioRemoverApp:
         if valid_paths:
             self.add_files_to_queue(valid_paths)
         else:
-            messagebox.showinfo("Info", "No valid media files found in dropped items.")
+            messagebox.showinfo(t("dialogs.info_title"), t("dialogs.no_media_in_drop"))
 
     def browse_files(self):
         filenames = filedialog.askopenfilenames(
-            title="Select Video/Audio Files (可多选)",
+            title=t("dialogs.select_files_title"),
             filetypes=[
-                ("Media files", "*.mp4 *.avi *.mkv *.mov *.flv *.wmv *.webm *.mp3 *.wav *.flac *.m4a *.aac *.ogg *.ts *.m4v"),
-                ("All files", "*.*")
+                (t("dialogs.file_filter_media"), "*.mp4 *.avi *.mkv *.mov *.flv *.wmv *.webm *.mp3 *.wav *.flac *.m4a *.aac *.ogg *.ts *.m4v"),
+                (t("dialogs.file_filter_all"), "*.*")
             ]
         )
         if filenames:
@@ -829,7 +1032,7 @@ class AudioRemoverApp:
                 continue
 
             fname = os.path.basename(abs_p)
-            item_id = self.tree.insert("", "end", values=(fname, "Calculating...", "Calculating...", "⏳ Pending"))
+            item_id = self.tree.insert("", "end", values=(fname, t("queue.status_calculating"), t("queue.status_calculating"), t("queue.status_pending")))
             self.file_queue[item_id] = {
                 "path": abs_p,
                 "name": fname,
@@ -850,7 +1053,7 @@ class AudioRemoverApp:
 
     def remove_selected_files(self):
         if self.is_processing:
-            messagebox.showwarning("Warning", "Cannot remove files while batch processing is in progress.")
+            messagebox.showwarning(t("dialogs.warning_title"), t("dialogs.cannot_remove_in_progress"))
             return
 
         selected = list(self.tree.selection())
@@ -879,7 +1082,7 @@ class AudioRemoverApp:
 
     def clear_file_queue(self):
         if self.is_processing:
-            messagebox.showwarning("Warning", "Cannot clear files while batch processing is in progress.")
+            messagebox.showwarning(t("dialogs.warning_title"), t("dialogs.cannot_clear_in_progress"))
             return
 
         for item_id in list(self.file_queue.keys()):
@@ -897,9 +1100,9 @@ class AudioRemoverApp:
     def _update_queue_summary(self):
         count = len(self.file_queue)
         if count == 0:
-            self.lbl_queue_count.config(text="Total: 0 files (空列表)")
+            self.lbl_queue_count.config(text=t("queue.count_empty"))
         else:
-            self.lbl_queue_count.config(text=f"Total: {count} file{'s' if count > 1 else ''}")
+            self.lbl_queue_count.config(text=t("queue.count_files", count=count))
 
     def _on_tree_selection_changed(self, event=None):
         selected = self.tree.selection()
@@ -935,7 +1138,7 @@ class AudioRemoverApp:
         if item_id not in self.file_queue:
             return False
         status_str = str(self.file_queue[item_id].get("status", ""))
-        return "Done" in status_str
+        return "Done" in status_str or "完成" in status_str
 
     def reset_selected_status(self):
         if self.is_processing:
@@ -945,7 +1148,7 @@ class AudioRemoverApp:
             if item_id in self.file_queue:
                 self.file_queue[item_id]["status"] = "Pending"
                 try:
-                    self.tree.set(item_id, "status", "⏳ Pending")
+                    self.tree.set(item_id, "status", t("queue.status_pending"))
                 except Exception:
                     pass
 
@@ -956,7 +1159,7 @@ class AudioRemoverApp:
             if item_id in self.file_queue:
                 self.file_queue[item_id]["status"] = "Pending"
                 try:
-                    self.tree.set(item_id, "status", "⏳ Pending")
+                    self.tree.set(item_id, "status", t("queue.status_pending"))
                 except Exception:
                     pass
 
@@ -965,7 +1168,7 @@ class AudioRemoverApp:
             return
         self._cancel_event.set()
         self.btn_cancel.config(state="disabled")
-        self.status_var.set("Cancelling batch processing...")
+        self.status_var.set(t("ops.cancelling"))
         proc = self._current_process
         if proc and proc.poll() is None:
             try:
@@ -975,7 +1178,7 @@ class AudioRemoverApp:
 
     def on_closing(self):
         if self.is_processing:
-            if messagebox.askyesno("Exit", "Batch processing is currently in progress. Do you want to cancel and exit?"):
+            if messagebox.askyesno(t("dialogs.exit_title"), t("dialogs.confirm_exit_processing")):
                 self.cancel_processing()
                 self.root.destroy()
         else:
@@ -992,7 +1195,7 @@ class AudioRemoverApp:
 
     def start_batch_processing(self):
         if not self.file_queue:
-            messagebox.showwarning("Warning", "Please add at least one file to the queue first.\n(请先向列表中添加媒体文件)")
+            messagebox.showwarning(t("dialogs.warning_title"), t("dialogs.queue_empty"))
             return
 
         should_mute = self.mute_var.get()
@@ -1006,13 +1209,13 @@ class AudioRemoverApp:
             start = self.start_time_var.get().strip()
             end = self.end_time_var.get().strip()
             if not start or not end:
-                messagebox.showwarning("Warning", "Please enter valid start/end times.")
+                messagebox.showwarning(t("dialogs.warning_title"), t("dialogs.invalid_trim_time"))
                 return
             trim_args = (start, end)
 
         is_custom_bitrate = bool(self._parse_custom_bitrate_kbps(bitrate_choice))
-        if not should_mute and not trim_args and convert_format == "None" and res_choice == "Original" and not is_custom_bitrate:
-            messagebox.showinfo("Info", "Nothing to do! Please select at least one conversion, mute, resolution, bitrate, or trim option.")
+        if not should_mute and not trim_args and convert_format == "None" and res_choice in ["Original", "保持原分辨率", t("options.res_original")] and not is_custom_bitrate:
+            messagebox.showinfo(t("dialogs.info_title"), t("dialogs.no_action_selected"))
             return
 
         # Check completed vs pending items (Skip any files that are already Done)
@@ -1023,10 +1226,7 @@ class AudioRemoverApp:
                     items_to_process.append((item_id, self.file_queue[item_id]))
 
         if not items_to_process:
-            messagebox.showinfo(
-                "Info",
-                "All files in the queue are already completed (Done).\n(列表中所有文件均已处理完成，无需重复处理。)\n\nTip: You can right-click any item to reset its status if you wish to re-process it.\n(提示：若需重新处理，可在列表中右键选择“重置为待处理”)"
-            )
+            messagebox.showinfo(t("dialogs.info_title"), t("dialogs.all_completed"))
             return
 
         self._cancel_event.clear()
@@ -1039,7 +1239,7 @@ class AudioRemoverApp:
         self.btn_cancel.config(state="normal")
         self.progress.config(mode='determinate')
         self.progress['value'] = 0
-        self.status_var.set(f"Batch processing starting... (0/{len(items_to_process)})")
+        self.status_var.set(t("ops.batch_starting", total=len(items_to_process)))
 
         threading.Thread(
             target=self._batch_worker,
@@ -1052,10 +1252,10 @@ class AudioRemoverApp:
 
     def update_progress(self, percent):
         self.progress['value'] = percent
-        self.status_var.set(f"Processing... {percent:.1f}%")
+        self.status_var.set(f"{t('ops.process')}... {percent:.1f}%")
 
     def _parse_custom_bitrate_kbps(self, br_str):
-        if not br_str or br_str.strip().lower() in ["auto", "none", "default", "-", "original"]:
+        if not br_str or br_str.strip().lower() in ["auto", "自动", "none", "default", "-", "original", "保持原分辨率"]:
             return None
         s = br_str.strip().lower().replace(" ", "").replace("/s", "").replace("ps", "")
         m = re.match(r"^([\d.]+)\s*(k|m|kb|mb)?$", s)
@@ -1185,7 +1385,14 @@ class AudioRemoverApp:
 
     def _update_item_status(self, item_id, status_text):
         if item_id in self.file_queue:
-            self.file_queue[item_id]["status"] = status_text
+            if "Done" in status_text or "完成" in status_text:
+                self.file_queue[item_id]["status"] = "Done"
+            elif "Failed" in status_text or "失败" in status_text:
+                self.file_queue[item_id]["status"] = "Failed"
+            elif "Cancelled" in status_text or "取消" in status_text:
+                self.file_queue[item_id]["status"] = "Cancelled"
+            else:
+                self.file_queue[item_id]["status"] = status_text
         try:
             self.tree.set(item_id, "status", status_text)
         except Exception:
@@ -1206,7 +1413,7 @@ class AudioRemoverApp:
 
         for idx, (item_id, item_data) in enumerate(items_to_process, start=1):
             if self._cancel_event.is_set():
-                self.dispatch_ui(self._update_item_status, item_id, "⏹️ Cancelled")
+                self.dispatch_ui(self._update_item_status, item_id, t("queue.status_cancelled"))
                 continue
 
             file_path = item_data["path"]
@@ -1214,14 +1421,14 @@ class AudioRemoverApp:
 
             # Select and bring into view
             self.dispatch_ui(self._set_tree_active_item, item_id)
-            self.dispatch_ui(self.status_var.set, f"[{idx}/{total}] Processing: {file_name} (0.0%)")
+            self.dispatch_ui(self.status_var.set, t("ops.processing_file", idx=idx, total=total, filename=file_name, percent=0.0))
             self.dispatch_ui(self.update_progress, 0)
             self.dispatch_ui(self._update_item_status, item_id, "🔄 0%")
 
             def file_progress(percent):
                 self.dispatch_ui(self.update_progress, percent)
                 self.dispatch_ui(self._update_item_status, item_id, f"🔄 {percent:.0f}%")
-                self.dispatch_ui(self.status_var.set, f"[{idx}/{total}] Processing: {file_name} ({percent:.1f}%)")
+                self.dispatch_ui(self.status_var.set, t("ops.processing_file", idx=idx, total=total, filename=file_name, percent=percent))
 
             success, msg, status_code = self.process_single_file(
                 file_path, should_mute, convert_format, trim_args, res_choice, bitrate_choice, encoder_choice,
@@ -1229,17 +1436,17 @@ class AudioRemoverApp:
             )
 
             if status_code == "cancelled":
-                self.dispatch_ui(self._update_item_status, item_id, "⏹️ Cancelled")
+                self.dispatch_ui(self._update_item_status, item_id, t("queue.status_cancelled"))
                 # Mark remaining items as Cancelled
                 for rem_id, _ in items_to_process[idx:]:
-                    self.dispatch_ui(self._update_item_status, rem_id, "⏹️ Cancelled")
+                    self.dispatch_ui(self._update_item_status, rem_id, t("queue.status_cancelled"))
                 break
             elif success:
                 success_count += 1
-                self.dispatch_ui(self._update_item_status, item_id, "✅ Done")
+                self.dispatch_ui(self._update_item_status, item_id, t("queue.status_done"))
             else:
                 fail_count += 1
-                self.dispatch_ui(self._update_item_status, item_id, "❌ Failed")
+                self.dispatch_ui(self._update_item_status, item_id, t("queue.status_failed"))
 
         self.dispatch_ui(self.finish_batch, success_count, fail_count, total)
 
@@ -1253,20 +1460,20 @@ class AudioRemoverApp:
 
         if self._cancel_event.is_set():
             rem = max(total - success_count - fail_count, 0)
-            self.status_var.set(f"Batch cancelled. ({success_count} completed, {rem} cancelled)")
-            messagebox.showinfo("Cancelled", f"Batch processing was cancelled.\n- Completed: {success_count}\n- Remaining: {rem}")
+            self.status_var.set(t("ops.batch_cancelled", success=success_count, rem=rem))
+            messagebox.showinfo(t("dialogs.cancelled_title"), t("dialogs.batch_cancelled_msg", success=success_count, rem=rem))
         else:
             self.progress['value'] = 100.0
-            self.status_var.set(f"Batch complete! Succeeded: {success_count}, Failed: {fail_count} (Total: {total})")
+            self.status_var.set(t("ops.batch_complete", success=success_count, fail=fail_count, total=total))
             if fail_count == 0:
                 messagebox.showinfo(
-                    "Success",
-                    f"All {success_count} file{'s' if success_count > 1 else ''} processed successfully!\n(全部 {success_count} 个文件处理完成！)"
+                    t("dialogs.success_title"),
+                    t("dialogs.all_success_msg", count=success_count)
                 )
             else:
                 messagebox.showwarning(
-                    "Finished with errors",
-                    f"Batch finished:\n- Succeeded: {success_count}\n- Failed: {fail_count}\n(部分文件处理失败，请查看列表中的状态)"
+                    t("dialogs.finished_errors_title"),
+                    t("dialogs.batch_error_msg", success=success_count, fail=fail_count)
                 )
 
     def process_video(self, input_path, should_mute, convert_format, trim_args=None, res_choice="Original", bitrate_choice="Auto", encoder_choice="Auto"):
@@ -1446,7 +1653,7 @@ class AudioRemoverApp:
 
             # Fallback to libx264 if GPU encoding failed
             if returncode != 0 and resolved_encoder != "libx264" and convert_format not in ["MP3", "FLAC"]:
-                self.dispatch_ui(self.status_var.set, f"GPU error on {filename}. Falling back to CPU...")
+                self.dispatch_ui(self.status_var.set, t("dialogs.gpu_error_fallback", filename=filename))
                 _cleanup_output()
                 returncode, error_msg = execute_ffmpeg("libx264")
 
